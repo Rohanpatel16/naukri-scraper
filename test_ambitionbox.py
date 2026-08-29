@@ -1,4 +1,4 @@
-"""CLI diagnostic tool to test AmbitionBox company data and website extraction.
+"""Ultra-Fast CLI diagnostic tool to test AmbitionBox company data and website extraction.
 
 Can be run locally or via GitHub Actions workflow dispatch.
 """
@@ -10,22 +10,20 @@ import asyncio
 import json
 import re
 import sys
+import time
 from typing import Any, Dict
 
 from playwright.async_api import async_playwright
 
-DEFAULT_TEST_URLS = [
-    "https://www.ambitionbox.com/overview/tcs-overview",
-    "https://www.ambitionbox.com/overview/infosys-overview",
-    "https://www.ambitionbox.com/overview/cognizant-overview",
-]
-
 
 async def test_ambitionbox_url(url: str) -> Dict[str, Any]:
-    """Test extracting company metadata and official website from AmbitionBox URL."""
+    """Test extracting company metadata and official website from AmbitionBox URL in 1-2 seconds."""
     print("=" * 70)
     print(f"[*] Testing AmbitionBox URL : {url}")
     print("=" * 70)
+
+    start_time = time.time()
+    extracted_data: Dict[str, Any] = {}
 
     async with async_playwright() as p:
         browser = None
@@ -38,6 +36,7 @@ async def test_ambitionbox_url(url: str) -> Dict[str, Any]:
                         "--disable-blink-features=AutomationControlled",
                         "--no-sandbox",
                         "--disable-dev-shm-usage",
+                        "--disable-gpu",
                     ],
                 )
                 break
@@ -53,82 +52,84 @@ async def test_ambitionbox_url(url: str) -> Dict[str, Any]:
             viewport={"width": 1440, "height": 900},
             locale="en-US",
             timezone_id="Asia/Kolkata",
-            extra_http_headers={
-                "Accept-Language": "en-US,en;q=0.9",
-                "Sec-Ch-Ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
-                "Sec-Ch-Ua-Mobile": "?0",
-                "Sec-Ch-Ua-Platform": '"Windows"',
-            },
         )
         await context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined});")
 
-        print("[*] 1. Testing Playwright in-browser API context.request.get()...")
-        extracted_data: Dict[str, Any] = {}
+        page = await context.new_page()
 
-        try:
-            res = await context.request.get(url, timeout=12000)
-            print(f"    [+] HTTP Status Code: {res.status}")
-            text = await res.text()
-            print(f"    [+] Response Length: {len(text):,} bytes")
-
-            m = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', text)
-            if m:
-                payload = json.loads(m.group(1))
-                props = payload.get("props", {}).get("pageProps", {})
-                header = props.get("companyHeaderData", {}) or {}
-                meta = props.get("companyMetaInformation", {}) or {}
-                about = props.get("companyAbout", {}) or {}
-
-                extracted_data = {
-                    "Company Name": header.get("name") or header.get("companyName") or "",
-                    "Official Website": (meta.get("website") or header.get("website") or "").strip(),
-                    "Rating": str(header.get("rating") or header.get("companyRating") or ""),
-                    "Reviews Count": str(header.get("reviewsCount") or header.get("totalReviews") or ""),
-                    "Industry": meta.get("industry") or header.get("industry") or "",
-                    "Headquarters": meta.get("headquarters") or header.get("hq") or "",
-                    "Ownership / Type": meta.get("ownership") or "",
-                    "Employee Count": meta.get("employeeCount") or "",
-                    "About Summary": (about.get("description") or header.get("about") or "")[:200] + "...",
-                }
+        # Aggressively block non-essential trackers, fonts, images, and styles
+        async def route_handler(route):
+            url_str = route.request.url.lower()
+            rtype = route.request.resource_type
+            if rtype in ["image", "media", "font", "stylesheet"] or any(
+                x in url_str for x in ["google", "clarity", "facebook", "doubleclick", "analytics", "track", "hotjar"]
+            ):
+                await route.abort()
             else:
-                web_m = re.search(r'"website"\s*:\s*"(https?://[^"]+)"', text)
-                if web_m:
-                    extracted_data["Official Website"] = web_m.group(1).replace("\\/", "").strip()
+                await route.continue_()
+
+        await page.route("**/*", route_handler)
+
+        t_nav = time.time()
+        print("[*] Navigating with fast commit stream...")
+        try:
+            await page.goto(url, wait_until="commit", timeout=12000)
+
+            # Poll for __NEXT_DATA__ JSON payload immediately as HTML streams
+            for _ in range(40):
+                data = await page.evaluate("""() => {
+                    const el = document.getElementById('__NEXT_DATA__');
+                    if (el) {
+                        try {
+                            const d = JSON.parse(el.textContent);
+                            const props = d.props?.pageProps || {};
+                            const meta = props.companyMetaInformation || {};
+                            const header = props.companyHeaderData || {};
+                            const about = props.companyAbout || {};
+                            return {
+                                name: header.name || header.companyName || '',
+                                website: meta.website || header.website || '',
+                                rating: String(header.rating || header.companyRating || ''),
+                                reviews: String(header.reviewsCount || header.totalReviews || ''),
+                                industry: meta.industry || header.industry || '',
+                                headquarters: meta.headquarters || header.hq || '',
+                                ownership: (meta.ownership && meta.ownership.name) ? meta.ownership.name : String(meta.ownership || ''),
+                                employees: meta.employeeCount || '',
+                                about: (about.description || header.about || '').slice(0, 200),
+                            };
+                        } catch(e) {}
+                    }
+                    return null;
+                }""")
+                if data and data.get("website"):
+                    extracted_data = {
+                        "Company Name": data.get("name"),
+                        "Official Website": data.get("website"),
+                        "Rating": data.get("rating"),
+                        "Reviews Count": data.get("reviews"),
+                        "Industry": data.get("industry"),
+                        "Headquarters": data.get("headquarters"),
+                        "Ownership / Type": data.get("ownership"),
+                        "Employee Count": data.get("employees"),
+                        "About Summary": data.get("about") + ("..." if data.get("about") else ""),
+                    }
+                    break
+                await asyncio.sleep(0.05)
 
         except Exception as exc:
-            print(f"    [!] Error during API fetch: {exc}")
-
-        # If needed, test full page load fallback
-        if not extracted_data.get("Official Website"):
-            print("[*] 2. Fallback: Testing full page DOM render...")
-            page = await context.new_page()
-            try:
-                await page.goto(url, wait_until="domcontentloaded", timeout=20000)
-                page_website = await page.evaluate("""() => {
-                    try {
-                        const el = document.getElementById('__NEXT_DATA__');
-                        if (el) {
-                            const d = JSON.parse(el.textContent);
-                            const props = d.props?.pageProps;
-                            return props?.companyMetaInformation?.website || props?.companyHeaderData?.website || '';
-                        }
-                    } catch(e) {}
-                    return '';
-                }""")
-                if page_website:
-                    extracted_data["Official Website"] = page_website
-            except Exception as exc:
-                print(f"    [!] Page render error: {exc}")
-            await page.close()
+            print(f"[!] Error during extraction: {exc}")
 
         await browser.close()
 
+    elapsed = time.time() - start_time
+
     print("\n" + "-" * 70)
-    print("EXTRACTED AMBITIONBOX COMPANY DATA:")
+    print(f"EXTRACTED AMBITIONBOX COMPANY DATA (Completed in {elapsed:.2f}s):")
     print("-" * 70)
     if extracted_data:
         for k, v in extracted_data.items():
-            print(f"  * {k:<20}: {v}")
+            if v:
+                print(f"  * {k:<20}: {v}")
     else:
         print("  [!] No structured data could be extracted.")
     print("-" * 70 + "\n")
@@ -145,7 +146,6 @@ def main():
     )
     args = parser.parse_args()
 
-    # Automatically transform review URL to overview URL if given
     clean_url = args.url.strip()
     if "/reviews/" in clean_url:
         clean_url = re.sub(r"/reviews/([a-zA-Z0-9_-]+)-reviews", r"/overview/\1-overview", clean_url.split("?")[0])

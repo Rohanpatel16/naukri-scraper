@@ -45,9 +45,9 @@ def clean_html(text: Optional[str]) -> str:
 async def enrich_company_websites_in_browser(
     jobs: List[Dict[str, Any]],
     context: BrowserContext,
-    concurrency: int = 12,
+    num_tabs: int = 4,
 ) -> None:
-    """Enrich jobs with official company websites using the active browser context with live terminal progress."""
+    """Enrich jobs with official company websites using pooled browser tabs with live terminal progress."""
     # Map each unique overview URL to a representative company name
     url_to_comp: Dict[str, str] = {}
     for j in jobs:
@@ -55,61 +55,82 @@ async def enrich_company_websites_in_browser(
         if ab_url and ab_url.startswith("http") and ab_url not in url_to_comp:
             url_to_comp[ab_url] = j.get("company") or "Company"
 
-    unique_urls = list(url_to_comp.keys())
-    total = len(unique_urls)
+    unique_items = list(url_to_comp.items())
+    total = len(unique_items)
     if total == 0:
         return
 
-    print(f"\n[*] Enriching {total} unique company websites in parallel...", flush=True)
+    print(f"\n[*] Enriching {total} unique company websites in parallel across {num_tabs} browser tabs...", flush=True)
     logger.info("Enriching %d unique company websites in parallel...", total)
 
-    sem = asyncio.Semaphore(concurrency)
+    queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue()
+    for item in unique_items:
+        await queue.put(item)
+
     completed = 0
     url_to_website: Dict[str, str] = {}
 
-    async def fetch_website_task(ab_url: str) -> None:
+    async def worker_tab(tab_id: int) -> None:
         nonlocal completed
-        comp_name = url_to_comp.get(ab_url, "Company")
+        page: Page = await context.new_page()
 
-        if ab_url in _COMPANY_WEBSITE_CACHE:
-            website = _COMPANY_WEBSITE_CACHE[ab_url]
-        else:
-            website = ""
-            async with sem:
+        # Aggressively abort non-essential trackers, fonts, images, and styles
+        async def route_handler(route):
+            url_str = route.request.url.lower()
+            rtype = route.request.resource_type
+            if rtype in ["image", "media", "font", "stylesheet"] or any(
+                x in url_str for x in ["google", "clarity", "facebook", "doubleclick", "analytics", "track", "hotjar"]
+            ):
+                await route.abort()
+            else:
+                await route.continue_()
+
+        await page.route("**/*", route_handler)
+
+        while not queue.empty():
+            try:
+                ab_url, comp_name = queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+
+            if ab_url in _COMPANY_WEBSITE_CACHE:
+                website = _COMPANY_WEBSITE_CACHE[ab_url]
+            else:
+                website = ""
                 try:
-                    res = await context.request.get(ab_url, timeout=8000)
-                    if res.status == 200:
-                        text = await res.text()
-                        # 1. Try __NEXT_DATA__ JSON payload
-                        m = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', text)
-                        if m:
-                            try:
-                                payload = json.loads(m.group(1))
-                                props = payload.get("props", {}).get("pageProps", {})
-                                meta = props.get("companyMetaInformation", {})
-                                header = props.get("companyHeaderData", {})
-                                website = (meta.get("website") or header.get("website") or "").strip()
-                            except Exception:
-                                pass
-
-                        # 2. Fallback regex search in HTML
-                        if not website:
-                            web_m = re.search(r'"website"\s*:\s*"(https?://[^"]+)"', text)
-                            if web_m:
-                                website = web_m.group(1).replace("\\/", "").strip()
+                    await page.goto(ab_url, wait_until="commit", timeout=12000)
+                    for _ in range(25):
+                        data = await page.evaluate("""() => {
+                            const el = document.getElementById('__NEXT_DATA__');
+                            if (el) {
+                                try {
+                                    const d = JSON.parse(el.textContent);
+                                    const props = d.props?.pageProps;
+                                    return props?.companyMetaInformation?.website || props?.companyHeaderData?.website || '';
+                                } catch(e) {}
+                            }
+                            return '';
+                        }""")
+                        if data:
+                            website = data.strip()
+                            break
+                        await asyncio.sleep(0.05)
                 except Exception:
                     pass
 
-            _COMPANY_WEBSITE_CACHE[ab_url] = website
+                _COMPANY_WEBSITE_CACHE[ab_url] = website
 
-        url_to_website[ab_url] = website
-        completed += 1
+            url_to_website[ab_url] = website
+            completed += 1
 
-        display_web = website if website else "[Not listed]"
-        print(f"[{completed}/{total}] {comp_name} -> {display_web}", flush=True)
+            display_web = website if website else "[Not listed]"
+            print(f"[{completed}/{total}] {comp_name} -> {display_web}", flush=True)
+            queue.task_done()
 
-    tasks = [fetch_website_task(url) for url in unique_urls]
-    await asyncio.gather(*tasks)
+        await page.close()
+
+    tab_count = min(num_tabs, total)
+    await asyncio.gather(*(worker_tab(i) for i in range(tab_count)))
 
     # Assign enriched websites back to all matching jobs
     found_count = 0
@@ -421,7 +442,7 @@ class NaukriBrowserScraper:
                     break
 
             # Enrich company websites inside the active browser context with live terminal logging
-            await enrich_company_websites_in_browser(all_jobs, context, concurrency=12)
+            await enrich_company_websites_in_browser(all_jobs, context, num_tabs=4)
 
             await browser.close()
 
