@@ -1,0 +1,35 @@
+name: Test AmbitionBox Extraction
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: 'AmbitionBox Overview or Reviews URL (e.g. https://www.ambitionbox.com/overview/tcs-overview)'
+        required: true
+        default: 'https://www.ambitionbox.com/overview/tcs-overview'
+
+jobs:
+  test-ambitionbox:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r naukri_scraper/requirements.txt
+          python -m playwright install --with-deps chromium
+
+      - name: Run AmbitionBox Test
+        run: |
+          TARGET_URL="${{ github.event.inputs.url }}"
+          echo "Testing target: $TARGET_URL"
+          python test_ambitionbox.py --url "$TARGET_URL"
