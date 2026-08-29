@@ -44,15 +44,31 @@ def clean_html(text: Optional[str]) -> str:
     return re.sub(r"\s+", " ", t).strip()
 
 
+HTTP_SESSION = requests.Session()
+HTTP_SESSION.headers.update({
+    "User-Agent": DEFAULT_HEADERS["User-Agent"],
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Sec-Ch-Ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+    "Sec-Ch-Ua-Mobile": "?0",
+    "Sec-Ch-Ua-Platform": '"Windows"',
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Upgrade-Insecure-Requests": "1",
+})
+
+
 def fetch_single_website(overview_url: str) -> tuple[str, str]:
     """Fetch official company website from AmbitionBox Overview page via fast HTTP."""
-    if not overview_url:
+    if not overview_url or not overview_url.startswith("http"):
         return overview_url, ""
     if overview_url in _COMPANY_WEBSITE_CACHE:
         return overview_url, _COMPANY_WEBSITE_CACHE[overview_url]
 
     try:
-        res = requests.get(overview_url, headers=DEFAULT_HEADERS, timeout=5)
+        res = HTTP_SESSION.get(overview_url, timeout=6)
         if res.status_code == 200:
             m = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', res.text)
             if m:
@@ -61,6 +77,13 @@ def fetch_single_website(overview_url: str) -> tuple[str, str]:
                 meta = props.get("companyMetaInformation", {})
                 header = props.get("companyHeaderData", {})
                 website = (meta.get("website") or header.get("website") or "").strip()
+                if website:
+                    _COMPANY_WEBSITE_CACHE[overview_url] = website
+                    return overview_url, website
+
+            web_match = re.search(r'"website"\s*:\s*"(https?://[^"]+)"', res.text)
+            if web_match:
+                website = web_match.group(1).replace("\\/", "").strip()
                 _COMPANY_WEBSITE_CACHE[overview_url] = website
                 return overview_url, website
     except Exception:
