@@ -16,17 +16,27 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.9'
-          cache: 'pip' # Automatically caches pip dependencies
+          # We removed the automatic pip cache here to prevent the crash
+          # and replaced it with a manual one below for better control.
+
+      - name: Cache Pip Dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
 
       - name: Install Python Dependencies
-        run: pip install playwright pandas playwright-stealth
+        run: pip install -r requirements.txt
 
       - name: Cache Playwright Browsers
         id: cache-playwright
         uses: actions/cache@v4
         with:
           path: ~/.cache/ms-playwright
-          key: playwright-chromium-${{ runner.os }}-${{ hashFiles('**/requirements.txt') }}
+          # Fixed key: if requirements.txt changes, it re-downloads the browser
+          key: playwright-chromium-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
           restore-keys: |
             playwright-chromium-${{ runner.os }}-
 
@@ -34,7 +44,7 @@ jobs:
         if: steps.cache-playwright.outputs.cache-hit != 'true'
         run: playwright install chromium --with-deps
 
-      - name: Install System Deps (Required every time)
+      - name: Install System Deps
         run: npx playwright install-deps chromium
 
       - name: Run scraper
