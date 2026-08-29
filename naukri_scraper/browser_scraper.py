@@ -1,11 +1,12 @@
 """High-Performance Async Multi-Tab Browser Scraper for Naukri.com.
 
-Features:
-- Async parallel multi-tab scraping (3-5 concurrent page workers)
-- Media/font asset blocking to eliminate network overhead
-- Real-time internal JobAPI JSON interception (100% data fidelity)
+Optimized for high speed, stability on cloud CI/CD runners (GitHub Actions / Linux),
+and local environments with 100% data fidelity:
+- Async parallel multi-tab scraping
+- Stealth browser flags & anti-automation evasion
+- Robust API interception with fallback DOM extraction
+- Image/media route blocking for minimal latency
 - Parallel ThreadPool website enrichment for unique companies
-- Robust early-exit when no more pages exist
 """
 
 from __future__ import annotations
@@ -89,7 +90,7 @@ def enrich_company_websites_parallel(jobs: List[Dict[str, Any]], max_workers: in
 class NaukriBrowserScraper:
     """High-performance parallel browser scraper for Naukri search URLs."""
 
-    def __init__(self, headless: bool = True, timeout_ms: int = 30000, num_workers: int = 4) -> None:
+    def __init__(self, headless: bool = True, timeout_ms: int = 35000, num_workers: int = 3) -> None:
         self.headless = headless
         self.timeout_ms = timeout_ms
         self.num_workers = max(1, num_workers)
@@ -117,53 +118,61 @@ class NaukriBrowserScraper:
         """Worker task to scrape a subset of pages on its own tab."""
         page: Page = await context.new_page()
 
-        # Abort images, fonts, and media for maximum network speed
+        # Abort images and media for fast network performance
         async def route_handler(route):
-            if route.request.resource_type in ["image", "media", "font"]:
+            if route.request.resource_type in ["image", "media"]:
                 await route.abort()
             else:
                 await route.continue_()
 
         await page.route("**/*", route_handler)
+
+        # Single unified response listener for the lifetime of this page
+        latest_page_jobs: List[Dict[str, Any]] = []
+
+        async def on_res(response):
+            if "jobapi/v3/search" in response.url or "jobapi" in response.url:
+                try:
+                    payload = await response.json()
+                    jobs = payload.get("jobDetails", [])
+                    if jobs:
+                        latest_page_jobs.extend(jobs)
+                except Exception:
+                    pass
+
+        page.on("response", on_res)
+
         worker_jobs: List[Dict[str, Any]] = []
+        consecutive_empty = 0
+
+        # Stagger initial launch slightly between workers
+        await asyncio.sleep((worker_id - 1) * 0.4)
 
         for page_num in page_numbers:
             target_url = self._build_page_url(search_url, page_num)
-            page_api_jobs: List[Dict[str, Any]] = []
-
-            async def on_res(response):
-                if "jobapi/v3/search" in response.url or "jobapi" in response.url:
-                    try:
-                        payload = await response.json()
-                        jobs = payload.get("jobDetails", [])
-                        if jobs:
-                            page_api_jobs.extend(jobs)
-                    except Exception:
-                        pass
-
-            page.on("response", on_res)
+            latest_page_jobs.clear()
 
             try:
                 await page.goto(target_url, wait_until="domcontentloaded", timeout=self.timeout_ms)
 
-                # Wait dynamically for API response payload (up to 3.5s)
-                for _ in range(35):
-                    if page_api_jobs:
+                # Wait dynamically for API response payload
+                for _ in range(60):
+                    if latest_page_jobs:
                         break
                     await asyncio.sleep(0.1)
 
-                if not page_api_jobs:
+                if not latest_page_jobs:
                     try:
-                        await page.wait_for_selector(".srp-jobtuple-wrapper, .cust-job-tuple", timeout=3000)
+                        await page.wait_for_selector(".srp-jobtuple-wrapper, .cust-job-tuple", timeout=6000)
                     except Exception:
                         pass
 
             except Exception as exc:
-                logger.debug("[Worker %d] Page %d load timeout: %s", worker_id, page_num, exc)
-                break
+                logger.debug("[Worker %d] Page %d timeout/exception: %s", worker_id, page_num, exc)
 
-            if page_api_jobs:
-                for raw in page_api_jobs:
+            if latest_page_jobs:
+                consecutive_empty = 0
+                for raw in latest_page_jobs:
                     job_id = str(raw.get("jobId") or "").strip()
                     if not job_id:
                         continue
@@ -243,14 +252,18 @@ class NaukriBrowserScraper:
                         "source": "naukri",
                     })
 
-                logger.info("[Worker %d] Page %d scraped (%d jobs).", worker_id, page_num, len(page_api_jobs))
+                logger.info("[Worker %d] Page %d scraped (%d jobs).", worker_id, page_num, len(latest_page_jobs))
             else:
                 # Fallback to DOM elements if API response was missed
                 cards = await page.query_selector_all(".srp-jobtuple-wrapper, .cust-job-tuple")
                 if not cards:
-                    logger.info("[Worker %d] No cards on page %d; stopping worker.", worker_id, page_num)
-                    break
+                    consecutive_empty += 1
+                    if consecutive_empty >= 2:
+                        logger.info("[Worker %d] Reached end of results at page %d; stopping worker.", worker_id, page_num)
+                        break
+                    continue
 
+                consecutive_empty = 0
                 for card in cards:
                     try:
                         title_el = await card.query_selector("a.title")
@@ -309,7 +322,15 @@ class NaukriBrowserScraper:
             browser: Optional[Browser] = None
             for channel in ["msedge", "chrome", None]:
                 try:
-                    kwargs = {"headless": self.headless}
+                    kwargs: Dict[str, Any] = {
+                        "headless": self.headless,
+                        "args": [
+                            "--disable-blink-features=AutomationControlled",
+                            "--no-sandbox",
+                            "--disable-setuid-sandbox",
+                            "--disable-dev-shm-usage",
+                        ],
+                    }
                     if channel:
                         kwargs["channel"] = channel
                     browser = await p.chromium.launch(**kwargs)
@@ -318,13 +339,22 @@ class NaukriBrowserScraper:
                     continue
 
             if not browser:
-                logger.error("Could not launch Playwright browser.")
+                logger.error("Could not launch Playwright browser. Please ensure browsers are installed (`playwright install`).")
                 return []
 
             context: BrowserContext = await browser.new_context(
                 user_agent=DEFAULT_HEADERS["User-Agent"],
-                viewport={"width": 1280, "height": 800},
+                viewport={"width": 1440, "height": 900},
+                locale="en-US",
+                timezone_id="Asia/Kolkata",
+                extra_http_headers={
+                    "Accept-Language": "en-US,en;q=0.9",
+                    "Sec-Ch-Ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+                    "Sec-Ch-Ua-Mobile": "?0",
+                    "Sec-Ch-Ua-Platform": '"Windows"',
+                },
             )
+            await context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined});")
 
             # Partition pages among workers (interleaved for load balancing)
             actual_workers = min(self.num_workers, max_pages)
@@ -370,6 +400,5 @@ class NaukriBrowserScraper:
         try:
             return asyncio.run(self._async_scrape_url(search_url, max_pages, max_jobs))
         except RuntimeError:
-            # If an event loop is already running in the current thread
             loop = asyncio.get_event_loop()
             return loop.run_until_complete(self._async_scrape_url(search_url, max_pages, max_jobs))

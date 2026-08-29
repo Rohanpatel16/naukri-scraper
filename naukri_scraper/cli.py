@@ -151,15 +151,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(f"[+] Scraping finished in {elapsed:.2f} seconds.")
     print(f"[+] Total Matching Jobs Found: {len(jobs)}")
 
-    if not jobs:
-        print("[!] No matching jobs found with current filters. Try broader keywords or locations.")
-        return 0
-
     # Save results
     if args.output.endswith(".json"):
         out_path = save_to_json(jobs, args.output)
     else:
         out_path = save_to_csv(jobs, args.output)
+
+    if not jobs:
+        print("[!] No matching jobs found with current filters. Try broader keywords or locations.")
+        return 0
 
     print(f"[+] Results saved to: {out_path.resolve()}\n")
 
