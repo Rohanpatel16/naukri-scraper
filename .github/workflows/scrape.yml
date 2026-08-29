@@ -42,4 +42,17 @@ jobs:
 
       - name: Upload Debug Screenshot
         if: always()
-        uses:
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-screenshot
+          path: error_screen.png
+
+      - name: Commit and push changes
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          if [ -f naukri_data.csv ]; then
+            git add naukri_data.csv
+            git commit -m "Update job listings: $(date)" || echo "No changes to commit"
+            git push
+          fi
