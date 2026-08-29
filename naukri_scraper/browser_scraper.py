@@ -6,22 +6,20 @@ and local environments with 100% data fidelity:
 - Stealth browser flags & anti-automation evasion
 - Robust API interception with fallback DOM extraction
 - Image/media route blocking for minimal latency
-- Parallel ThreadPool website enrichment for unique companies
+- In-browser parallel context website enrichment for unique companies with real-time terminal progress
 """
 
 from __future__ import annotations
 
 import asyncio
-import concurrent.futures
 import datetime
 import html
 import json
 import logging
 import re
-import time
+import sys
 from typing import Any, Dict, List, Optional, Set
 
-import requests
 from playwright.async_api import Browser, BrowserContext, Page, async_playwright
 
 from .config import DEFAULT_HEADERS
@@ -29,7 +27,7 @@ from .parser import parse_job_url
 
 logger = logging.getLogger(__name__)
 
-# Global cache for company website lookups
+# Global cache for company website lookups across batches
 _COMPANY_WEBSITE_CACHE: Dict[str, str] = {}
 
 
@@ -44,70 +42,86 @@ def clean_html(text: Optional[str]) -> str:
     return re.sub(r"\s+", " ", t).strip()
 
 
-HTTP_SESSION = requests.Session()
-HTTP_SESSION.headers.update({
-    "User-Agent": DEFAULT_HEADERS["User-Agent"],
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Sec-Ch-Ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
-    "Sec-Ch-Ua-Mobile": "?0",
-    "Sec-Ch-Ua-Platform": '"Windows"',
-    "Sec-Fetch-Dest": "document",
-    "Sec-Fetch-Mode": "navigate",
-    "Sec-Fetch-Site": "none",
-    "Sec-Fetch-User": "?1",
-    "Upgrade-Insecure-Requests": "1",
-})
+async def enrich_company_websites_in_browser(
+    jobs: List[Dict[str, Any]],
+    context: BrowserContext,
+    concurrency: int = 12,
+) -> None:
+    """Enrich jobs with official company websites using the active browser context with live terminal progress."""
+    # Map each unique overview URL to a representative company name
+    url_to_comp: Dict[str, str] = {}
+    for j in jobs:
+        ab_url = j.get("ambition_box_url")
+        if ab_url and ab_url.startswith("http") and ab_url not in url_to_comp:
+            url_to_comp[ab_url] = j.get("company") or "Company"
 
-
-def fetch_single_website(overview_url: str) -> tuple[str, str]:
-    """Fetch official company website from AmbitionBox Overview page via fast HTTP."""
-    if not overview_url or not overview_url.startswith("http"):
-        return overview_url, ""
-    if overview_url in _COMPANY_WEBSITE_CACHE:
-        return overview_url, _COMPANY_WEBSITE_CACHE[overview_url]
-
-    try:
-        res = HTTP_SESSION.get(overview_url, timeout=6)
-        if res.status_code == 200:
-            m = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', res.text)
-            if m:
-                payload = json.loads(m.group(1))
-                props = payload.get("props", {}).get("pageProps", {})
-                meta = props.get("companyMetaInformation", {})
-                header = props.get("companyHeaderData", {})
-                website = (meta.get("website") or header.get("website") or "").strip()
-                if website:
-                    _COMPANY_WEBSITE_CACHE[overview_url] = website
-                    return overview_url, website
-
-            web_match = re.search(r'"website"\s*:\s*"(https?://[^"]+)"', res.text)
-            if web_match:
-                website = web_match.group(1).replace("\\/", "").strip()
-                _COMPANY_WEBSITE_CACHE[overview_url] = website
-                return overview_url, website
-    except Exception:
-        pass
-
-    _COMPANY_WEBSITE_CACHE[overview_url] = ""
-    return overview_url, ""
-
-
-def enrich_company_websites_parallel(jobs: List[Dict[str, Any]], max_workers: int = 15) -> None:
-    """Enrich all jobs with company websites in parallel for unique overview URLs."""
-    unique_urls = list({j.get("ambition_box_url") for j in jobs if j.get("ambition_box_url")})
-    if not unique_urls:
+    unique_urls = list(url_to_comp.keys())
+    total = len(unique_urls)
+    if total == 0:
         return
 
-    logger.info("Enriching %d unique company websites in parallel...", len(unique_urls))
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        results = list(executor.map(fetch_single_website, unique_urls))
+    print(f"\n[*] Enriching {total} unique company websites in parallel...", flush=True)
+    logger.info("Enriching %d unique company websites in parallel...", total)
 
-    url_to_website = dict(results)
+    sem = asyncio.Semaphore(concurrency)
+    completed = 0
+    url_to_website: Dict[str, str] = {}
+
+    async def fetch_website_task(ab_url: str) -> None:
+        nonlocal completed
+        comp_name = url_to_comp.get(ab_url, "Company")
+
+        if ab_url in _COMPANY_WEBSITE_CACHE:
+            website = _COMPANY_WEBSITE_CACHE[ab_url]
+        else:
+            website = ""
+            async with sem:
+                try:
+                    res = await context.request.get(ab_url, timeout=8000)
+                    if res.status == 200:
+                        text = await res.text()
+                        # 1. Try __NEXT_DATA__ JSON payload
+                        m = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', text)
+                        if m:
+                            try:
+                                payload = json.loads(m.group(1))
+                                props = payload.get("props", {}).get("pageProps", {})
+                                meta = props.get("companyMetaInformation", {})
+                                header = props.get("companyHeaderData", {})
+                                website = (meta.get("website") or header.get("website") or "").strip()
+                            except Exception:
+                                pass
+
+                        # 2. Fallback regex search in HTML
+                        if not website:
+                            web_m = re.search(r'"website"\s*:\s*"(https?://[^"]+)"', text)
+                            if web_m:
+                                website = web_m.group(1).replace("\\/", "").strip()
+                except Exception:
+                    pass
+
+            _COMPANY_WEBSITE_CACHE[ab_url] = website
+
+        url_to_website[ab_url] = website
+        completed += 1
+
+        display_web = website if website else "[Not listed]"
+        print(f"[{completed}/{total}] {comp_name} -> {display_web}", flush=True)
+
+    tasks = [fetch_website_task(url) for url in unique_urls]
+    await asyncio.gather(*tasks)
+
+    # Assign enriched websites back to all matching jobs
+    found_count = 0
     for job in jobs:
         ab_url = job.get("ambition_box_url", "")
         if ab_url in url_to_website:
-            job["company_website"] = url_to_website[ab_url]
+            web = url_to_website[ab_url]
+            job["company_website"] = web
+            if web:
+                found_count += 1
+
+    print(f"[+] Finished company website enrichment ({found_count}/{total} resolved).\n", flush=True)
 
 
 class NaukriBrowserScraper:
@@ -390,25 +404,26 @@ class NaukriBrowserScraper:
             ]
 
             results = await asyncio.gather(*tasks)
+
+            # Deduplicate and cap results
+            all_jobs: List[Dict[str, Any]] = []
+            seen_job_ids: Set[str] = set()
+
+            for worker_res in results:
+                for job in worker_res:
+                    jid = job.get("job_id")
+                    if jid and jid not in seen_job_ids:
+                        seen_job_ids.add(jid)
+                        all_jobs.append(job)
+                        if len(all_jobs) >= max_jobs:
+                            break
+                if len(all_jobs) >= max_jobs:
+                    break
+
+            # Enrich company websites inside the active browser context with live terminal logging
+            await enrich_company_websites_in_browser(all_jobs, context, concurrency=12)
+
             await browser.close()
-
-        # Deduplicate and cap results
-        all_jobs: List[Dict[str, Any]] = []
-        seen_job_ids: Set[str] = set()
-
-        for worker_res in results:
-            for job in worker_res:
-                jid = job.get("job_id")
-                if jid and jid not in seen_job_ids:
-                    seen_job_ids.add(jid)
-                    all_jobs.append(job)
-                    if len(all_jobs) >= max_jobs:
-                        break
-            if len(all_jobs) >= max_jobs:
-                break
-
-        # Fast parallel company website enrichment
-        enrich_company_websites_parallel(all_jobs)
 
         logger.info("Scraped %d unique jobs across %d pages.", len(all_jobs), max_pages)
         return all_jobs
