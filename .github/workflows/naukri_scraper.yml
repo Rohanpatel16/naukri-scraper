@@ -1,0 +1,92 @@
+name: Naukri Job Scraper
+
+on:
+  schedule:
+    # Runs daily at 06:00 UTC (11:30 AM IST)
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+    inputs:
+      url:
+        description: 'Direct Naukri search URL (optional; if set, overrides keywords)'
+        required: false
+        default: 'https://www.naukri.com/jobs-in-india?functionAreaIdGid=4&functionAreaIdGid=5&functionAreaIdGid=8&jobAge=1&clusters=functionalAreaGid,Freshness'
+      pages:
+        description: 'Pages to scrape when using direct URL (default: 5)'
+        required: false
+        default: '5'
+      keywords:
+        description: 'Keywords to search (if URL is empty)'
+        required: false
+        default: 'python devops'
+      location:
+        description: 'Location filter (e.g. Bangalore, Pune, Hyderabad, Remote)'
+        required: false
+        default: ''
+      experience:
+        description: 'Target experience years (e.g. 2, 3, 5)'
+        required: false
+        default: ''
+      hours:
+        description: 'Time limit in hours (e.g. 24 for last 24 hours, leave blank for all time)'
+        required: false
+        default: '24'
+      max_jobs:
+        description: 'Maximum jobs to fetch'
+        required: false
+        default: '100'
+
+jobs:
+  scrape-jobs:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r naukri_scraper/requirements.txt
+          python -m playwright install --with-deps chromium
+
+      - name: Run Naukri Scraper
+        run: |
+          URL="${{ github.event.inputs.url }}"
+          PAGES="${{ github.event.inputs.pages || '5' }}"
+          KEYWORDS="${{ github.event.inputs.keywords || 'python devops' }}"
+          LOCATION="${{ github.event.inputs.location || '' }}"
+          EXPERIENCE="${{ github.event.inputs.experience || '' }}"
+          HOURS="${{ github.event.inputs.hours || '24' }}"
+          MAX_JOBS="${{ github.event.inputs.max_jobs || '100' }}"
+
+          if [ -n "$URL" ]; then
+            CMD="python -m naukri_scraper.cli --url \"$URL\" --pages $PAGES --max-jobs $MAX_JOBS --output naukri_jobs.csv"
+          else
+            CMD="python -m naukri_scraper.cli --keywords $KEYWORDS --max-jobs $MAX_JOBS --output naukri_jobs.csv"
+            if [ -n "$LOCATION" ]; then
+              CMD="$CMD --location \"$LOCATION\""
+            fi
+            if [ -n "$EXPERIENCE" ]; then
+              CMD="$CMD --experience $EXPERIENCE"
+            fi
+            if [ -n "$HOURS" ]; then
+              CMD="$CMD --hours $HOURS"
+            fi
+          fi
+
+          echo "Running: $CMD"
+          eval $CMD
+
+      - name: Upload Scraped Jobs CSV
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: naukri-jobs-csv
+          path: naukri_jobs.csv
+          retention-days: 30

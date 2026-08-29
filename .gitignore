@@ -1,0 +1,27 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Scraped data & logs
+*.csv
+*.json
+*.log
+error_screen.png
+
+# Environments & IDEs
+.env
+.venv
+env/
+venv/
+ENV/
+.vscode/
+.idea/
+
+# Testing & Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Playwright
+.playwright/
