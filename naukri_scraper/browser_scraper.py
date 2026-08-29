@@ -155,11 +155,19 @@ class NaukriBrowserScraper:
                         # Description
                         job_desc = clean_html(raw.get("jobDescription", ""))
 
-                        # AmbitionBox Review Data
+                        # AmbitionBox Review & Overview Data
                         ab_data = raw.get("ambitionBoxData") or {}
                         company_rating = str(ab_data.get("AggregateRating", "")).strip()
                         reviews_count = str(ab_data.get("ReviewsCount", "")).strip()
-                        ambition_box_url = ab_data.get("Url", "")
+                        raw_ab_url = ab_data.get("Url", "")
+                        ambition_box_url = ""
+                        if raw_ab_url:
+                            clean_ab = raw_ab_url.split("?")[0]
+                            ambition_box_url = re.sub(
+                                r"/reviews/([a-zA-Z0-9_-]+)-reviews",
+                                r"https://www.ambitionbox.com/overview/\1-overview",
+                                clean_ab,
+                            )
 
                         # Vacancies & Freshness
                         vacancies = str(raw.get("vacancy", "")).strip()
