@@ -1,7 +1,21 @@
-"""Browser-based Scraper for custom Naukri search URLs using Playwright."""
+"""Browser-based Scraper for custom Naukri search URLs using Playwright.
+
+Captures all rich fields directly from internal JobAPI responses and DOM:
+- Job Title, Company Name, Locations, Experience
+- Salary & CTC details
+- Skills / Tags
+- Job Description Snippet
+- AmbitionBox Rating & Review Count
+- AmbitionBox Review URL
+- Vacancies & Openings
+- Freshness badge & Posting Date
+- Direct Apply URLs
+"""
 
 from __future__ import annotations
 
+import datetime
+import html
 import logging
 import re
 import time
@@ -15,8 +29,20 @@ from .parser import parse_job_url
 logger = logging.getLogger(__name__)
 
 
+def clean_html(text: Optional[str]) -> str:
+    """Strip HTML tags and unescape entities into clean plain text."""
+    if not text:
+        return ""
+    # Convert breaks and list items to spaces
+    t = re.sub(r"<br\s*/?>", " ", text, flags=re.IGNORECASE)
+    t = re.sub(r"</(p|li|h\d)>", " ", t, flags=re.IGNORECASE)
+    t = re.sub(r"<[^>]+>", " ", t)
+    t = html.unescape(t)
+    return re.sub(r"\s+", " ", t).strip()
+
+
 class NaukriBrowserScraper:
-    """Scrapes jobs directly from any custom Naukri search URL using Playwright."""
+    """Scrapes rich job records directly from any custom Naukri search URL."""
 
     def __init__(self, headless: bool = True, timeout_ms: int = 45000) -> None:
         self.headless = headless
@@ -27,10 +53,8 @@ class NaukriBrowserScraper:
         if page_num <= 1:
             return base_url
 
-        # Check if URL already has query parameters
         if "?" in base_url:
             path, query = base_url.split("?", 1)
-            # e.g., https://www.naukri.com/jobs-in-india -> https://www.naukri.com/jobs-in-india-2
             path = re.sub(r"-\d+$", "", path)
             return f"{path}-{page_num}?{query}"
         else:
@@ -43,21 +67,20 @@ class NaukriBrowserScraper:
         max_pages: int = 5,
         max_jobs: int = 100,
     ) -> List[Dict[str, Any]]:
-        """Scrape jobs from a specific Naukri search URL with pagination.
+        """Scrape rich jobs from a specific Naukri search URL with pagination.
 
         Args:
-            search_url: Full Naukri search URL (with functionalArea, jobAge, etc.).
+            search_url: Full Naukri search URL.
             max_pages: Maximum number of search pages to paginate through.
             max_jobs: Target maximum number of jobs to return.
 
         Returns:
-            List of structured job dictionaries.
+            List of structured job dictionaries with all rich fields.
         """
         matched_jobs: List[Dict[str, Any]] = []
         seen_job_ids: Set[str] = set()
 
         with sync_playwright() as p:
-            # Try to launch Edge/Chrome channel, fallback to default chromium
             browser: Optional[Browser] = None
             for channel in ["msedge", "chrome", None]:
                 try:
@@ -83,6 +106,20 @@ class NaukriBrowserScraper:
                 target_url = self._build_page_url(search_url, page_num)
                 logger.info("[%d/%d] Scraping page: %s", page_num, max_pages, target_url)
 
+                page_api_jobs: List[Dict[str, Any]] = []
+
+                def on_response(response):
+                    if "jobapi/v3/search" in response.url or "jobapi" in response.url:
+                        try:
+                            payload = response.json()
+                            job_list = payload.get("jobDetails", [])
+                            if job_list:
+                                page_api_jobs.extend(job_list)
+                        except Exception:
+                            pass
+
+                page.on("response", on_response)
+
                 try:
                     page.goto(target_url, wait_until="domcontentloaded", timeout=self.timeout_ms)
                     page.wait_for_selector(".srp-jobtuple-wrapper, .cust-job-tuple", timeout=20000)
@@ -90,68 +127,162 @@ class NaukriBrowserScraper:
                     logger.warning("Page %d load timeout or no job cards found: %s", page_num, exc)
                     break
 
-                # Extract job card DOM elements
-                cards = page.query_selector_all(".srp-jobtuple-wrapper, .cust-job-tuple")
-                if not cards:
-                    logger.info("No job cards found on page %d; stopping pagination.", page_num)
-                    break
-
-                page_jobs_count = 0
-                for card in cards:
-                    try:
-                        title_el = card.query_selector("a.title")
-                        if not title_el:
-                            continue
-
-                        title = title_el.inner_text().strip()
-                        job_url = title_el.get_attribute("href") or ""
-                        if not job_url:
-                            continue
-
-                        # Extract Job ID and date from URL or fallback
-                        parsed = parse_job_url(job_url)
-                        job_id = parsed["job_id"] if parsed else str(abs(hash(job_url)))
-
-                        if job_id in seen_job_ids:
+                # 1. Process intercepted JobAPI items (richest data source)
+                if page_api_jobs:
+                    for raw in page_api_jobs:
+                        job_id = str(raw.get("jobId") or "").strip()
+                        if not job_id or job_id in seen_job_ids:
                             continue
 
                         seen_job_ids.add(job_id)
 
-                        comp_el = card.query_selector("a.comp-name, a.company, .comp-name")
-                        company = comp_el.inner_text().strip() if comp_el else (parsed["company"] if parsed else "")
+                        # Placeholders (exp, salary, loc)
+                        ph_dict = {p.get("type"): p.get("label", "") for p in raw.get("placeholders", []) if isinstance(p, dict)}
+                        
+                        title = raw.get("title", "").strip()
+                        company = raw.get("companyName", "").strip()
+                        location = ph_dict.get("location") or raw.get("location", "India")
+                        exp_text = ph_dict.get("experience") or raw.get("experienceText", "Not specified")
+                        salary = ph_dict.get("salary") or "Not disclosed"
 
-                        exp_el = card.query_selector(".expwdth, .exp-wrap, span[class*='exp']")
-                        exp_text = exp_el.inner_text().strip() if exp_el else (parsed["experience_text"] if parsed else "Not specified")
+                        # Skills / Tags
+                        raw_skills = raw.get("tagsAndSkills", "")
+                        if isinstance(raw_skills, list):
+                            skills = ", ".join([str(s.get("label", s)) for s in raw_skills])
+                        else:
+                            skills = str(raw_skills)
 
-                        loc_el = card.query_selector(".loc-wrap, .locWdth, span[class*='loc']")
-                        location = loc_el.inner_text().strip() if loc_el else (parsed["location"] if parsed else "India")
+                        # Description
+                        job_desc = clean_html(raw.get("jobDescription", ""))
 
-                        job_record = {
+                        # AmbitionBox Review Data
+                        ab_data = raw.get("ambitionBoxData") or {}
+                        company_rating = str(ab_data.get("AggregateRating", "")).strip()
+                        reviews_count = str(ab_data.get("ReviewsCount", "")).strip()
+                        ambition_box_url = ab_data.get("Url", "")
+
+                        # Vacancies & Freshness
+                        vacancies = str(raw.get("vacancy", "")).strip()
+                        freshness = raw.get("footerPlaceholderLabel", "").strip()
+
+                        # Posting Date
+                        created_ts = raw.get("createdDate")
+                        posted_date = ""
+                        if created_ts:
+                            try:
+                                posted_date = datetime.datetime.fromtimestamp(created_ts / 1000.0).strftime("%Y-%m-%d")
+                            except Exception:
+                                pass
+                        if not posted_date and len(job_id) >= 6:
+                            parsed_tmp = parse_job_url(f"https://www.naukri.com/job-listings-{job_id}")
+                            if parsed_tmp:
+                                posted_date = parsed_tmp.get("posted_date", "")
+
+                        # Min / Max Experience numbers
+                        min_exp = 0
+                        max_exp = 99
+                        try:
+                            if raw.get("minimumExperience") is not None:
+                                min_exp = int(raw["minimumExperience"])
+                            if raw.get("maximumExperience") is not None:
+                                max_exp = int(raw["maximumExperience"])
+                        except (ValueError, TypeError):
+                            pass
+
+                        jd_url = raw.get("jdURL", "")
+                        if jd_url and not jd_url.startswith("http"):
+                            full_url = "https://www.naukri.com" + jd_url
+                        else:
+                            full_url = jd_url
+
+                        record = {
                             "job_id": job_id,
                             "title": title,
                             "company": company,
                             "location": location,
-                            "min_experience": parsed["min_experience"] if parsed else 0,
-                            "max_experience": parsed["max_experience"] if parsed else 99,
                             "experience_text": exp_text,
-                            "posted_date": parsed["posted_date"] if parsed else "",
-                            "url": job_url,
+                            "salary": salary,
+                            "skills": skills,
+                            "job_description": job_desc,
+                            "company_rating": company_rating,
+                            "company_reviews_count": reviews_count,
+                            "ambition_box_url": ambition_box_url,
+                            "vacancies": vacancies,
+                            "freshness": freshness,
+                            "posted_date": posted_date,
+                            "min_experience": min_exp,
+                            "max_experience": max_exp,
+                            "url": full_url,
                             "source": "naukri",
                         }
 
-                        matched_jobs.append(job_record)
-                        page_jobs_count += 1
+                        matched_jobs.append(record)
 
                         if len(matched_jobs) >= max_jobs:
                             logger.info("Reached target limit of %d jobs.", max_jobs)
                             browser.close()
                             return matched_jobs
 
-                    except Exception as e:
-                        logger.debug("Error extracting card: %s", e)
-                        continue
+                # 2. Fallback to DOM elements if API response was missed
+                else:
+                    cards = page.query_selector_all(".srp-jobtuple-wrapper, .cust-job-tuple")
+                    for card in cards:
+                        try:
+                            title_el = card.query_selector("a.title")
+                            if not title_el:
+                                continue
 
-                logger.info("Page %d yielded %d unique jobs.", page_num, page_jobs_count)
+                            job_url = title_el.get_attribute("href") or ""
+                            parsed = parse_job_url(job_url)
+                            job_id = parsed["job_id"] if parsed else str(abs(hash(job_url)))
+
+                            if job_id in seen_job_ids:
+                                continue
+
+                            seen_job_ids.add(job_id)
+
+                            comp_el = card.query_selector("a.comp-name, a.company, .comp-name")
+                            exp_el = card.query_selector(".expwdth, .exp-wrap, span[class*='exp']")
+                            sal_el = card.query_selector(".sal-wrap, .ni-job-tuple-icon-srp-rupee, span[class*='sal']")
+                            loc_el = card.query_selector(".loc-wrap, .locWdth, span[class*='loc']")
+                            desc_el = card.query_selector(".job-desc, .job-description, .dang-inner-html")
+                            rating_el = card.query_selector(".rating, .ambitionBox, span[class*='rating']")
+                            reviews_el = card.query_selector(".review, span[class*='review']")
+
+                            # Skills tags in DOM
+                            tag_els = card.query_selector_all("ul.tags-gt li, .tag-li, .tagsAndSkills")
+                            dom_skills = ", ".join([t.inner_text().strip() for t in tag_els if t.inner_text().strip()])
+
+                            matched_jobs.append({
+                                "job_id": job_id,
+                                "title": title_el.inner_text().strip(),
+                                "company": comp_el.inner_text().strip() if comp_el else "",
+                                "location": loc_el.inner_text().strip() if loc_el else "India",
+                                "experience_text": exp_el.inner_text().strip() if exp_el else "Not specified",
+                                "salary": sal_el.inner_text().strip() if sal_el else "Not disclosed",
+                                "skills": dom_skills,
+                                "job_description": clean_html(desc_el.inner_text()) if desc_el else "",
+                                "company_rating": rating_el.inner_text().strip() if rating_el else "",
+                                "company_reviews_count": reviews_el.inner_text().strip() if reviews_el else "",
+                                "ambition_box_url": "",
+                                "vacancies": "",
+                                "freshness": "",
+                                "posted_date": parsed["posted_date"] if parsed else "",
+                                "min_experience": parsed["min_experience"] if parsed else 0,
+                                "max_experience": parsed["max_experience"] if parsed else 99,
+                                "url": job_url,
+                                "source": "naukri",
+                            })
+
+                            if len(matched_jobs) >= max_jobs:
+                                logger.info("Reached target limit of %d jobs.", max_jobs)
+                                browser.close()
+                                return matched_jobs
+
+                        except Exception:
+                            continue
+
+                logger.info("Page %d complete. Total collected so far: %d", page_num, len(matched_jobs))
                 time.sleep(1.5)
 
             browser.close()
