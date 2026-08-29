@@ -1,4 +1,4 @@
-"""Ultra-Fast CLI diagnostic tool to test AmbitionBox company data and website extraction.
+"""Robust, Fast CLI diagnostic tool to test AmbitionBox company data and website extraction.
 
 Can be run locally or via GitHub Actions workflow dispatch.
 """
@@ -17,7 +17,7 @@ from playwright.async_api import async_playwright
 
 
 async def test_ambitionbox_url(url: str) -> Dict[str, Any]:
-    """Test extracting company metadata and official website from AmbitionBox URL in 1-2 seconds."""
+    """Test extracting company metadata and official website from AmbitionBox URL."""
     print("=" * 70)
     print(f"[*] Testing AmbitionBox URL : {url}")
     print("=" * 70)
@@ -57,64 +57,55 @@ async def test_ambitionbox_url(url: str) -> Dict[str, Any]:
 
         page = await context.new_page()
 
-        # Aggressively block non-essential trackers, fonts, images, and styles
+        # Abort images and media to save bandwidth and speed up page load
         async def route_handler(route):
-            url_str = route.request.url.lower()
-            rtype = route.request.resource_type
-            if rtype in ["image", "media", "font", "stylesheet"] or any(
-                x in url_str for x in ["google", "clarity", "facebook", "doubleclick", "analytics", "track", "hotjar"]
-            ):
+            if route.request.resource_type in ["image", "media"]:
                 await route.abort()
             else:
                 await route.continue_()
 
         await page.route("**/*", route_handler)
 
-        t_nav = time.time()
-        print("[*] Navigating with fast commit stream...")
+        print("[*] Loading page...")
         try:
-            await page.goto(url, wait_until="commit", timeout=12000)
+            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
 
-            # Poll for __NEXT_DATA__ JSON payload immediately as HTML streams
+            # Extract from page HTML safely (never throws Execution Context Destroyed)
             for _ in range(40):
-                data = await page.evaluate("""() => {
-                    const el = document.getElementById('__NEXT_DATA__');
-                    if (el) {
-                        try {
-                            const d = JSON.parse(el.textContent);
-                            const props = d.props?.pageProps || {};
-                            const meta = props.companyMetaInformation || {};
-                            const header = props.companyHeaderData || {};
-                            const about = props.companyAbout || {};
-                            return {
-                                name: header.name || header.companyName || '',
-                                website: meta.website || header.website || '',
-                                rating: String(header.rating || header.companyRating || ''),
-                                reviews: String(header.reviewsCount || header.totalReviews || ''),
-                                industry: meta.industry || header.industry || '',
-                                headquarters: meta.headquarters || header.hq || '',
-                                ownership: (meta.ownership && meta.ownership.name) ? meta.ownership.name : String(meta.ownership || ''),
-                                employees: meta.employeeCount || '',
-                                about: (about.description || header.about || '').slice(0, 200),
-                            };
-                        } catch(e) {}
-                    }
-                    return null;
-                }""")
-                if data and data.get("website"):
-                    extracted_data = {
-                        "Company Name": data.get("name"),
-                        "Official Website": data.get("website"),
-                        "Rating": data.get("rating"),
-                        "Reviews Count": data.get("reviews"),
-                        "Industry": data.get("industry"),
-                        "Headquarters": data.get("headquarters"),
-                        "Ownership / Type": data.get("ownership"),
-                        "Employee Count": data.get("employees"),
-                        "About Summary": data.get("about") + ("..." if data.get("about") else ""),
-                    }
-                    break
-                await asyncio.sleep(0.05)
+                html_text = await page.content()
+                if "__NEXT_DATA__" in html_text or '"website"' in html_text:
+                    m = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', html_text)
+                    if m:
+                        try:
+                            d = json.loads(m.group(1))
+                            props = d.get("props", {}).get("pageProps", {}) or {}
+                            meta = props.get("companyMetaInformation", {}) or {}
+                            header = props.get("companyHeaderData", {}) or {}
+                            about = props.get("companyAbout", {}) or {}
+
+                            extracted_data = {
+                                "Company Name": header.get("name") or header.get("companyName") or "",
+                                "Official Website": (meta.get("website") or header.get("website") or "").strip(),
+                                "Rating": str(header.get("rating") or header.get("companyRating") or ""),
+                                "Reviews Count": str(header.get("reviewsCount") or header.get("totalReviews") or ""),
+                                "Industry": meta.get("industry") or header.get("industry") or "",
+                                "Headquarters": meta.get("headquarters") or header.get("hq") or "",
+                                "Ownership / Type": (meta.get("ownership", {}).get("name") if isinstance(meta.get("ownership"), dict) else str(meta.get("ownership") or "")),
+                                "Employee Count": meta.get("employeeCount") or "",
+                                "About Summary": (about.get("description") or header.get("about") or "")[:200] + "...",
+                            }
+                        except Exception:
+                            pass
+
+                    if not extracted_data.get("Official Website"):
+                        web_m = re.search(r'"website"\s*:\s*"(https?://[^"]+)"', html_text)
+                        if web_m:
+                            extracted_data["Official Website"] = web_m.group(1).replace("\\/", "").strip()
+
+                    if extracted_data.get("Official Website"):
+                        break
+
+                await asyncio.sleep(0.1)
 
         except Exception as exc:
             print(f"[!] Error during extraction: {exc}")

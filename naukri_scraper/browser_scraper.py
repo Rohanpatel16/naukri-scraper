@@ -98,23 +98,29 @@ async def enrich_company_websites_in_browser(
             else:
                 website = ""
                 try:
-                    await page.goto(ab_url, wait_until="commit", timeout=12000)
-                    for _ in range(25):
-                        data = await page.evaluate("""() => {
-                            const el = document.getElementById('__NEXT_DATA__');
-                            if (el) {
-                                try {
-                                    const d = JSON.parse(el.textContent);
-                                    const props = d.props?.pageProps;
-                                    return props?.companyMetaInformation?.website || props?.companyHeaderData?.website || '';
-                                } catch(e) {}
-                            }
-                            return '';
-                        }""")
-                        if data:
-                            website = data.strip()
-                            break
-                        await asyncio.sleep(0.05)
+                    await page.goto(ab_url, wait_until="domcontentloaded", timeout=20000)
+                    for _ in range(30):
+                        html_text = await page.content()
+                        if "__NEXT_DATA__" in html_text or '"website"' in html_text:
+                            m = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', html_text)
+                            if m:
+                                try:
+                                    d = json.loads(m.group(1))
+                                    props = d.get("props", {}).get("pageProps", {})
+                                    meta = props.get("companyMetaInformation", {})
+                                    header = props.get("companyHeaderData", {})
+                                    website = (meta.get("website") or header.get("website") or "").strip()
+                                except Exception:
+                                    pass
+
+                            if not website:
+                                web_m = re.search(r'"website"\s*:\s*"(https?://[^"]+)"', html_text)
+                                if web_m:
+                                    website = web_m.group(1).replace("\\/", "").strip()
+
+                            if website:
+                                break
+                        await asyncio.sleep(0.1)
                 except Exception:
                     pass
 
