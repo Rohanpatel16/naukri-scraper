@@ -1,12 +1,12 @@
 """Browser-based Scraper for custom Naukri search URLs using Playwright.
 
-Captures all rich fields directly from internal JobAPI responses and DOM:
-- Job Title, Company Name, Locations, Experience
+Captures all rich fields directly from internal JobAPI responses, DOM, and AmbitionBox:
+- Job Title, Company Name, Official Website, Locations, Experience
 - Salary & CTC details
 - Skills / Tags
 - Job Description Snippet
 - AmbitionBox Rating & Review Count
-- AmbitionBox Review URL
+- AmbitionBox Company Overview URL
 - Vacancies & Openings
 - Freshness badge & Posting Date
 - Direct Apply URLs
@@ -16,11 +16,13 @@ from __future__ import annotations
 
 import datetime
 import html
+import json
 import logging
 import re
 import time
 from typing import Any, Dict, List, Optional, Set
 
+import requests
 from playwright.sync_api import Browser, Page, sync_playwright
 
 from .config import DEFAULT_HEADERS
@@ -28,17 +30,45 @@ from .parser import parse_job_url
 
 logger = logging.getLogger(__name__)
 
+# Cache company website lookups across jobs to avoid duplicate HTTP requests
+_COMPANY_WEBSITE_CACHE: Dict[str, str] = {}
+
 
 def clean_html(text: Optional[str]) -> str:
     """Strip HTML tags and unescape entities into clean plain text."""
     if not text:
         return ""
-    # Convert breaks and list items to spaces
     t = re.sub(r"<br\s*/?>", " ", text, flags=re.IGNORECASE)
     t = re.sub(r"</(p|li|h\d)>", " ", t, flags=re.IGNORECASE)
     t = re.sub(r"<[^>]+>", " ", t)
     t = html.unescape(t)
     return re.sub(r"\s+", " ", t).strip()
+
+
+def fetch_company_website(overview_url: str) -> str:
+    """Fast HTTP fetch of official company website from AmbitionBox Overview page."""
+    if not overview_url:
+        return ""
+    if overview_url in _COMPANY_WEBSITE_CACHE:
+        return _COMPANY_WEBSITE_CACHE[overview_url]
+
+    try:
+        res = requests.get(overview_url, headers=DEFAULT_HEADERS, timeout=5)
+        if res.status_code == 200:
+            m = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', res.text)
+            if m:
+                payload = json.loads(m.group(1))
+                props = payload.get("props", {}).get("pageProps", {})
+                meta = props.get("companyMetaInformation", {})
+                header = props.get("companyHeaderData", {})
+                website = (meta.get("website") or header.get("website") or "").strip()
+                _COMPANY_WEBSITE_CACHE[overview_url] = website
+                return website
+    except Exception as e:
+        logger.debug("Could not fetch company website from %s: %s", overview_url, e)
+
+    _COMPANY_WEBSITE_CACHE[overview_url] = ""
+    return ""
 
 
 class NaukriBrowserScraper:
@@ -165,9 +195,12 @@ class NaukriBrowserScraper:
                             clean_ab = raw_ab_url.split("?")[0]
                             ambition_box_url = re.sub(
                                 r"/reviews/([a-zA-Z0-9_-]+)-reviews",
-                                r"https://www.ambitionbox.com/overview/\1-overview",
+                                r"/overview/\1-overview",
                                 clean_ab,
                             )
+
+                        # Official Company Website (fetched fast and cached)
+                        company_website = fetch_company_website(ambition_box_url)
 
                         # Vacancies & Freshness
                         vacancies = str(raw.get("vacancy", "")).strip()
@@ -207,6 +240,7 @@ class NaukriBrowserScraper:
                             "job_id": job_id,
                             "title": title,
                             "company": company,
+                            "company_website": company_website,
                             "location": location,
                             "experience_text": exp_text,
                             "salary": salary,
@@ -265,6 +299,7 @@ class NaukriBrowserScraper:
                                 "job_id": job_id,
                                 "title": title_el.inner_text().strip(),
                                 "company": comp_el.inner_text().strip() if comp_el else "",
+                                "company_website": "",
                                 "location": loc_el.inner_text().strip() if loc_el else "India",
                                 "experience_text": exp_el.inner_text().strip() if exp_el else "Not specified",
                                 "salary": sal_el.inner_text().strip() if sal_el else "Not disclosed",

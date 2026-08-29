@@ -87,6 +87,7 @@ JOB_FIELDS = [
     "job_id",
     "title",
     "company",
+    "company_website",
     "location",
     "experience_text",
     "salary",

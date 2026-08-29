@@ -108,6 +108,7 @@ def parse_job_url(url: str) -> Optional[Dict[str, Any]]:
         "job_id": job_id,
         "title": title,
         "company": company,
+        "company_website": "",
         "location": location_str,
         "experience_text": exp_text,
         "salary": "Not disclosed",
