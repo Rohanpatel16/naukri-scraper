@@ -2,8 +2,8 @@ name: Naukri Job Scraper
 
 on:
   schedule:
-    - cron: '0 6 * * *' # Runs daily at 6:00 AM UTC
-  workflow_dispatch: # Allows manual trigger
+    - cron: '0 6 * * *' 
+  workflow_dispatch: 
 
 jobs:
   build:
@@ -19,7 +19,9 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install httpx pandas
+          pip install playwright pandas
+          playwright install chromium
+          playwright install-deps chromium
 
       - name: Run scraper
         run: python scraper.py
