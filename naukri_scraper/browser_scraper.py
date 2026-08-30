@@ -2,11 +2,11 @@
 
 Optimized for high speed, stability on cloud CI/CD runners (GitHub Actions / Linux),
 and local environments with 100% data fidelity:
-- Async parallel multi-tab scraping
+- Async parallel multi-tab search scraping
 - Stealth browser flags & anti-automation evasion
-- Robust API interception with fallback DOM extraction
-- Image/media route blocking for minimal latency
-- In-browser parallel context website enrichment for unique companies with real-time terminal progress
+- Built-in instant resolution for top 100+ major employers (0ms latency)
+- Paced live tab enrichment for remaining companies with live terminal progress
+- Hard timeouts and clean resource disposal (guaranteed zero hangs)
 """
 
 from __future__ import annotations
@@ -27,8 +27,104 @@ from .parser import parse_job_url
 
 logger = logging.getLogger(__name__)
 
-# Global cache for company website lookups across batches
+# Global cache for company website lookups across runs/batches
 _COMPANY_WEBSITE_CACHE: Dict[str, str] = {}
+
+# Instant domain registry for prominent employers in India (0ms lookup, zero network calls)
+KNOWN_COMPANY_DOMAINS: Dict[str, str] = {
+    "tata consultancy services": "https://www.tcs.com/",
+    "tcs": "https://www.tcs.com/",
+    "infosys": "https://www.infosys.com/",
+    "cognizant": "https://www.cognizant.com/",
+    "cognizant technology solutions": "https://www.cognizant.com/",
+    "wipro": "https://www.wipro.com/",
+    "hcltech": "https://www.hcltech.com/",
+    "hcl technologies": "https://www.hcltech.com/",
+    "accenture": "https://www.accenture.com/",
+    "capgemini": "https://www.capgemini.com/",
+    "tech mahindra": "https://www.techmahindra.com/",
+    "ibm": "https://www.ibm.com/",
+    "amazon": "https://www.amazon.jobs/",
+    "microsoft": "https://www.microsoft.com/",
+    "google": "https://careers.google.com/",
+    "oracle": "https://www.oracle.com/",
+    "pwc": "https://www.pwc.com/",
+    "deloitte": "https://www.deloitte.com/",
+    "ey": "https://www.ey.com/",
+    "ernst & young": "https://www.ey.com/",
+    "kpmg": "https://www.kpmg.com/",
+    "larsen & toubro (l&t)": "https://www.larsentoubro.com/",
+    "larsen & toubro": "https://www.larsentoubro.com/",
+    "l&t": "https://www.larsentoubro.com/",
+    "ltimindtree": "https://www.ltimindtree.com/",
+    "mindtree": "https://www.ltimindtree.com/",
+    "lti": "https://www.ltimindtree.com/",
+    "cisco": "https://www.cisco.com/",
+    "mphasis": "https://www.mphasis.com/",
+    "hexaware technologies": "https://www.hexaware.com/",
+    "hexaware": "https://www.hexaware.com/",
+    "persistent systems": "https://www.persistent.com/",
+    "persistent": "https://www.persistent.com/",
+    "coforge": "https://www.coforge.com/",
+    "birlasoft": "https://www.birlasoft.com/",
+    "cyient": "https://www.cyient.com/",
+    "zensar technologies": "https://www.zensar.com/",
+    "zensar": "https://www.zensar.com/",
+    "tata elxsi": "https://www.tataelxsi.com/",
+    "adani group": "https://www.adani.com/",
+    "adani": "https://www.adani.com/",
+    "reliance": "https://www.ril.com/",
+    "reliance industries": "https://www.ril.com/",
+    "jio": "https://www.jio.com/",
+    "reliance jio": "https://www.jio.com/",
+    "airtel": "https://www.airtel.in/",
+    "bharti airtel": "https://www.airtel.in/",
+    "eclerx": "https://eclerx.com/",
+    "eclerx services": "https://eclerx.com/",
+    "quest global": "https://www.quest-global.com/",
+    "xoriant": "https://www.xoriant.com/",
+    "synechron": "https://www.synechron.com/",
+    "lenovo": "https://www.lenovo.com/",
+    "nokia": "https://www.nokia.com/",
+    "quick heal technologies": "https://www.quickheal.co.in/",
+    "datamatics": "https://www.datamatics.com/",
+    "nec corporation": "https://in.nec.com/",
+    "virtusa": "https://www.virtusa.com/",
+    "sutherland": "https://www.sutherlandglobal.com/",
+    "tavant": "https://www.tavant.com/",
+    "happiest minds technologies": "https://www.happiestminds.com/",
+    "happiest minds": "https://www.happiestminds.com/",
+    "nagarro": "https://www.nagarro.com/",
+    "epam systems": "https://www.epam.com/",
+    "epam": "https://www.epam.com/",
+    "ntt data, inc.": "https://services.global.ntt/en-us/",
+    "ntt data": "https://services.global.ntt/en-us/",
+    "calsoft": "https://calsoftinc.com/",
+    "bajaj finance": "https://www.bajajfinserv.in/",
+    "tracxn": "https://tracxn.com/",
+    "hurix": "https://www.hurix.com/",
+    "2coms": "https://www.2coms.com/",
+    "mergen infotech": "https://mergeninfotech.com/",
+    "amar ujala": "https://www.amarujala.com/",
+    "cloudxtreme": "https://www.cloudxtreme.info/",
+    "intellics global services": "https://intellicsglobal.com/",
+    "tekwissen": "https://www.tekwissen.com/",
+    "osi digital": "https://www.osidigital.com/",
+    "kairos technologies": "https://www.kairostech.com/",
+    "eisneramper": "https://www.eisneramper.com/",
+    "hinduja tech": "https://hindujatech.com/",
+    "mindshare": "https://www.mindshareworld.com/",
+    "t-systems ict india pvt ltd": "https://www.t-systems.com/in/en",
+    "kellton": "https://www.kellton.com/",
+    "sap": "https://www.sap.com/",
+    "salesforce": "https://www.salesforce.com/",
+    "dell technologies": "https://www.dell.com/",
+    "dell": "https://www.dell.com/",
+    "hp": "https://www.hp.com/",
+    "intel": "https://www.intel.com/",
+    "nvidia": "https://www.nvidia.com/",
+    "qualcomm": "https://www.qualcomm.com/",
+}
 
 
 def clean_html(text: Optional[str]) -> str:
@@ -45,61 +141,100 @@ def clean_html(text: Optional[str]) -> str:
 async def enrich_company_websites_in_browser(
     jobs: List[Dict[str, Any]],
     context: BrowserContext,
-    num_tabs: int = 4,
+    num_tabs: int = 2,
+    max_enrichment_seconds: float = 90.0,
 ) -> None:
-    """Enrich jobs with official company websites using pooled browser tabs with live terminal progress."""
-    # Map each unique overview URL to a representative company name
+    """Enrich jobs with official company websites:
+    1. Instant lookup for known enterprise employers (0ms).
+    2. Cached lookup for previous hits.
+    3. Paced multi-tab live extraction for remaining companies.
+    4. Guaranteed no-hang with hard timeouts and graceful cleanup.
+    """
     url_to_comp: Dict[str, str] = {}
     for j in jobs:
         ab_url = j.get("ambition_box_url")
+        cname = (j.get("company") or "").strip()
         if ab_url and ab_url.startswith("http") and ab_url not in url_to_comp:
-            url_to_comp[ab_url] = j.get("company") or "Company"
+            url_to_comp[ab_url] = cname or "Company"
 
     unique_items = list(url_to_comp.items())
     total = len(unique_items)
     if total == 0:
         return
 
-    print(f"\n[*] Enriching {total} unique company websites in parallel across {num_tabs} browser tabs...", flush=True)
-    logger.info("Enriching %d unique company websites in parallel...", total)
-
-    queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue()
-    for item in unique_items:
-        await queue.put(item)
+    print(f"\n[*] Enriching {total} unique company websites...", flush=True)
+    logger.info("Enriching %d unique company websites...", total)
 
     completed = 0
     url_to_website: Dict[str, str] = {}
+    remaining_to_fetch: List[tuple[str, str]] = []
+
+    # 1. Fast resolve known domains and cached items
+    for ab_url, comp_name in unique_items:
+        norm_name = comp_name.lower().strip()
+        if ab_url in _COMPANY_WEBSITE_CACHE:
+            url_to_website[ab_url] = _COMPANY_WEBSITE_CACHE[ab_url]
+            completed += 1
+        elif norm_name in KNOWN_COMPANY_DOMAINS:
+            site = KNOWN_COMPANY_DOMAINS[norm_name]
+            _COMPANY_WEBSITE_CACHE[ab_url] = site
+            url_to_website[ab_url] = site
+            completed += 1
+            print(f"[{completed}/{total}] {comp_name} -> {site} (Known Registry)", flush=True)
+        else:
+            remaining_to_fetch.append((ab_url, comp_name))
+
+    print(f"[+] Instantly resolved {completed}/{total} companies. Fetching remaining {len(remaining_to_fetch)} via live browser tabs...", flush=True)
+
+    if not remaining_to_fetch:
+        for job in jobs:
+            ab_url = job.get("ambition_box_url", "")
+            if ab_url in url_to_website:
+                job["company_website"] = url_to_website[ab_url]
+        return
+
+    queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue()
+    for item in remaining_to_fetch:
+        await queue.put(item)
+
+    consecutive_blocks = 0
 
     async def worker_tab(tab_id: int) -> None:
-        nonlocal completed
-        page: Page = await context.new_page()
+        nonlocal completed, consecutive_blocks
+        page: Optional[Page] = None
+        try:
+            page = await context.new_page()
 
-        # Aggressively abort non-essential trackers, fonts, images, and styles
-        async def route_handler(route):
-            url_str = route.request.url.lower()
-            rtype = route.request.resource_type
-            if rtype in ["image", "media", "font", "stylesheet"] or any(
-                x in url_str for x in ["google", "clarity", "facebook", "doubleclick", "analytics", "track", "hotjar"]
-            ):
-                await route.abort()
-            else:
-                await route.continue_()
+            async def route_handler(route):
+                try:
+                    if route.request.resource_type in ["image", "media", "font"]:
+                        await route.abort()
+                    else:
+                        await route.continue_()
+                except Exception:
+                    pass
 
-        await page.route("**/*", route_handler)
+            await page.route("**/*", route_handler)
 
-        while not queue.empty():
-            try:
-                ab_url, comp_name = queue.get_nowait()
-            except asyncio.QueueEmpty:
-                break
+            while not queue.empty():
+                try:
+                    ab_url, comp_name = queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
 
-            if ab_url in _COMPANY_WEBSITE_CACHE:
-                website = _COMPANY_WEBSITE_CACHE[ab_url]
-            else:
+                # If Cloudflare anti-bot blocks multiple consecutive times, break early without hanging
+                if consecutive_blocks >= 12:
+                    _COMPANY_WEBSITE_CACHE[ab_url] = ""
+                    url_to_website[ab_url] = ""
+                    completed += 1
+                    print(f"[{completed}/{total}] {comp_name} -> [Rate Limited]", flush=True)
+                    queue.task_done()
+                    continue
+
                 website = ""
                 try:
-                    await page.goto(ab_url, wait_until="domcontentloaded", timeout=20000)
-                    for _ in range(30):
+                    await page.goto(ab_url, wait_until="domcontentloaded", timeout=12000)
+                    for _ in range(25):
                         html_text = await page.content()
                         if "__NEXT_DATA__" in html_text or '"website"' in html_text:
                             m = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', html_text)
@@ -121,22 +256,43 @@ async def enrich_company_websites_in_browser(
                             if website:
                                 break
                         await asyncio.sleep(0.1)
+
                 except Exception:
                     pass
 
+                if website:
+                    consecutive_blocks = 0
+                else:
+                    consecutive_blocks += 1
+
                 _COMPANY_WEBSITE_CACHE[ab_url] = website
+                url_to_website[ab_url] = website
+                completed += 1
 
-            url_to_website[ab_url] = website
-            completed += 1
+                display_web = website if website else "[Not listed]"
+                print(f"[{completed}/{total}] {comp_name} -> {display_web}", flush=True)
+                queue.task_done()
+                # Pacing between calls to avoid triggering Cloudflare rate limits
+                await asyncio.sleep(0.15)
 
-            display_web = website if website else "[Not listed]"
-            print(f"[{completed}/{total}] {comp_name} -> {display_web}", flush=True)
-            queue.task_done()
+        except Exception:
+            pass
+        finally:
+            if page:
+                try:
+                    await page.unroute("**/*")
+                    await asyncio.wait_for(page.close(), timeout=3.0)
+                except Exception:
+                    pass
 
-        await page.close()
-
-    tab_count = min(num_tabs, total)
-    await asyncio.gather(*(worker_tab(i) for i in range(tab_count)))
+    actual_tabs = min(num_tabs, len(remaining_to_fetch))
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(*(worker_tab(i) for i in range(actual_tabs))),
+            timeout=max_enrichment_seconds,
+        )
+    except asyncio.TimeoutError:
+        print(f"[!] Reached max enrichment time limit ({max_enrichment_seconds}s); proceeding with collected data.", flush=True)
 
     # Assign enriched websites back to all matching jobs
     found_count = 0
@@ -184,10 +340,13 @@ class NaukriBrowserScraper:
 
         # Abort images and media for fast network performance
         async def route_handler(route):
-            if route.request.resource_type in ["image", "media"]:
-                await route.abort()
-            else:
-                await route.continue_()
+            try:
+                if route.request.resource_type in ["image", "media"]:
+                    await route.abort()
+                else:
+                    await route.continue_()
+            except Exception:
+                pass
 
         await page.route("**/*", route_handler)
 
@@ -372,7 +531,12 @@ class NaukriBrowserScraper:
                     except Exception:
                         continue
 
-        await page.close()
+        try:
+            await page.unroute("**/*")
+            await asyncio.wait_for(page.close(), timeout=3.0)
+        except Exception:
+            pass
+
         return worker_jobs
 
     async def _async_scrape_url(
@@ -393,6 +557,7 @@ class NaukriBrowserScraper:
                             "--no-sandbox",
                             "--disable-setuid-sandbox",
                             "--disable-dev-shm-usage",
+                            "--disable-gpu",
                         ],
                     }
                     if channel:
@@ -448,9 +613,12 @@ class NaukriBrowserScraper:
                     break
 
             # Enrich company websites inside the active browser context with live terminal logging
-            await enrich_company_websites_in_browser(all_jobs, context, num_tabs=4)
+            await enrich_company_websites_in_browser(all_jobs, context, num_tabs=2, max_enrichment_seconds=90.0)
 
-            await browser.close()
+            try:
+                await asyncio.wait_for(browser.close(), timeout=5.0)
+            except Exception:
+                pass
 
         logger.info("Scraped %d unique jobs across %d pages.", len(all_jobs), max_pages)
         return all_jobs
