@@ -25,3 +25,6 @@ htmlcov/
 
 # Playwright
 .playwright/
+
+# Scratch & Temporary Folders
+scratch/

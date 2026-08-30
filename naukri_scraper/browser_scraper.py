@@ -515,7 +515,11 @@ class NaukriBrowserScraper:
             await enrich_company_websites_in_browser(all_jobs, context, num_tabs=3, max_enrichment_seconds=180.0)
 
             try:
-                await asyncio.wait_for(browser.close(), timeout=5.0)
+                await asyncio.wait_for(context.close(), timeout=4.0)
+            except Exception:
+                pass
+            try:
+                await asyncio.wait_for(browser.close(), timeout=4.0)
             except Exception:
                 pass
 
