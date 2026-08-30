@@ -74,10 +74,12 @@ jobs:
           echo "Running: $CMD"
           eval $CMD
 
-      - name: Upload Scraped Jobs CSV
+      - name: Upload Scraped CSVs
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: naukri-jobs-csv
-          path: naukri_jobs.csv
+          name: naukri-scraped-data
+          path: |
+            naukri_companies.csv
+            naukri_jobs.csv
           retention-days: 30

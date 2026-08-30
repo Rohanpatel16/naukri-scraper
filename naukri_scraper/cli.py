@@ -8,8 +8,16 @@ import sys
 import time
 from typing import List, Optional
 
+from pathlib import Path
+
 from .browser_scraper import NaukriBrowserScraper
-from .exporter import save_to_csv, save_to_json
+from .exporter import (
+    aggregate_companies,
+    save_companies_to_csv,
+    save_companies_to_json,
+    save_to_csv,
+    save_to_json,
+)
 from .scraper import NaukriScraper
 
 
@@ -160,27 +168,38 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(f"[+] Total Unique Companies : {unique_companies:,}")
     print(f"[+] Website Resolution Rate: {found_websites:,}/{len(jobs):,} jobs ({pct_web:.1f}% coverage)")
 
-    # Save results
+    # Aggregate into unique companies
+    companies_data = aggregate_companies(jobs)
+    comp_web_count = sum(1 for c in companies_data if c.get("company_website"))
+    pct_comp_web = (comp_web_count / len(companies_data) * 100.0) if companies_data else 0.0
+
+    print(f"[+] Companies with Website : {comp_web_count:,}/{len(companies_data):,} ({pct_comp_web:.1f}% company coverage)")
+
+    # Save results: unique companies sheet is primary, raw jobs sheet is also saved
+    comp_output = args.output if "comp" in args.output.lower() else "naukri_companies.csv"
     if args.output.endswith(".json"):
-        out_path = save_to_json(jobs, args.output)
+        comp_path = save_companies_to_json(companies_data, comp_output.replace(".csv", ".json"))
+        jobs_path = save_to_json(jobs, "naukri_jobs.json")
     else:
-        out_path = save_to_csv(jobs, args.output)
+        comp_path = save_companies_to_csv(companies_data, comp_output)
+        jobs_path = save_to_csv(jobs, "naukri_jobs.csv")
 
     if not jobs:
         print("[!] No matching jobs found with current filters. Try broader keywords or locations.")
         return 0
 
-    print(f"\n[+] Results saved to: {out_path.resolve()}\n")
+    print(f"\n[+] Unique Companies Sheet saved to : {comp_path.resolve()}")
+    print(f"[+] Full Job Listings Sheet saved to: {jobs_path.resolve()}\n")
 
-    # Display preview of top 5 jobs
-    print("Top Matches Preview:")
+    # Display preview of top 5 companies
+    print("Top Hiring Companies Preview:")
     print("=" * 60)
-    for i, job in enumerate(jobs[:5], 1):
-        print(f"#{i} {job['title']}")
-        if job.get('company'):
-            print(f"   Company : {job['company']}")
-        print(f"   Location: {job['location']} | Experience: {job['experience_text']}")
-        print(f"   URL     : {job['url']}\n")
+    for i, c in enumerate(companies_data[:5], 1):
+        print(f"#{i} {c['company_name']} ({c['total_jobs_posted']} job postings)")
+        if c.get('company_website'):
+            print(f"   Website   : {c['company_website']}")
+        print(f"   Job Titles: {c['job_titles'][:100]}...")
+        print(f"   Locations : {c['locations']}\n")
 
     return 0
 

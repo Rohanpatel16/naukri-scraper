@@ -104,3 +104,19 @@ JOB_FIELDS = [
     "url",
     "source",
 ]
+
+COMPANY_FIELDS = [
+    "company_name",
+    "company_website",
+    "total_jobs_posted",
+    "job_titles",
+    "naukri_job_urls",
+    "locations",
+    "experience_required",
+    "top_skills",
+    "salaries_disclosed",
+    "company_rating",
+    "company_reviews_count",
+    "ambition_box_url",
+    "latest_posted_date",
+]
