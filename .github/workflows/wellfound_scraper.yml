@@ -11,6 +11,14 @@ on:
         description: 'Number of pages to scrape (leave empty to auto-scrape all available pages)'
         required: false
         default: ''
+      days:
+        description: 'Filter recent jobs posted within last N days (optional, e.g. 3, 7, 14)'
+        required: false
+        default: ''
+      hours:
+        description: 'Filter recent jobs posted within last N hours (optional, e.g. 24, 48)'
+        required: false
+        default: ''
 
 jobs:
   scrape-wellfound:
@@ -37,10 +45,18 @@ jobs:
         run: |
           URL="${{ github.event.inputs.url }}"
           PAGES="${{ github.event.inputs.pages }}"
+          DAYS="${{ github.event.inputs.days }}"
+          HOURS="${{ github.event.inputs.hours }}"
 
           CMD="python -m naukri_scraper.wellfound_cli --url \"$URL\" --output wellfound_companies.csv"
           if [ -n "$PAGES" ]; then
             CMD="$CMD --pages $PAGES"
+          fi
+          if [ -n "$DAYS" ]; then
+            CMD="$CMD --days $DAYS"
+          fi
+          if [ -n "$HOURS" ]; then
+            CMD="$CMD --hours $HOURS"
           fi
 
           echo "Running: $CMD"

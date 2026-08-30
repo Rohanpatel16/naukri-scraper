@@ -51,6 +51,18 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         help="Max pages to scrape (default: all pages)",
     )
     parser.add_argument(
+        "-D", "--days",
+        type=int,
+        default=None,
+        help="Only include jobs posted within the last N days (e.g. -D 3, -D 7, -D 14)",
+    )
+    parser.add_argument(
+        "-H", "--hours",
+        type=int,
+        default=None,
+        help="Only include jobs posted within the last N hours (e.g. -H 24, -H 48)",
+    )
+    parser.add_argument(
         "-o", "--output",
         default="wellfound_companies.csv",
         help="Output CSV file (default: wellfound_companies.csv)",
@@ -75,6 +87,7 @@ FIELDS = [
     "company_linkedin_url",
     "total_jobs_posted",
     "job_titles",
+    "posted_dates",
     "wellfound_job_urls",
     "locations",
     "salaries",
@@ -103,19 +116,31 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(f"[*] Target URL  : {args.url}")
     pages_str = str(args.pages) if args.pages else "Auto-detect (all pages)"
     print(f"[*] Pages       : {pages_str}")
+
+    time_filter_str = "All Time"
+    if args.hours:
+        time_filter_str = f"Last {args.hours} Hours"
+    elif args.days:
+        time_filter_str = f"Last {args.days} Days"
+    print(f"[*] Time Filter : {time_filter_str}")
     print(f"[*] Output File : {args.output}")
     print("-" * 60)
 
-    from .wellfound_scraper import WellfoundScraper  # lazy import
+    from .wellfound_scraper import WellfoundScraper
 
     start = time.time()
     scraper = WellfoundScraper(headless=True, num_workers=args.workers)
-    companies = scraper.scrape(search_url=args.url, max_pages=args.pages)
+    companies = scraper.scrape(
+        search_url=args.url,
+        max_pages=args.pages,
+        days=args.days,
+        hours=args.hours,
+    )
     elapsed = time.time() - start
 
     if not companies:
-        print("[!] No companies found. Check the URL or try a different Wellfound search.")
-        return 1
+        print("[!] No companies found matching the current filters.")
+        return 0
 
     out_path = save_to_csv(companies, args.output)
 
@@ -140,9 +165,13 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(f"   Stage     : {c['stage']}")
         if c.get("company_website"):
             print(f"   Website   : {c['company_website']}")
+        if c.get("company_linkedin_url"):
+            print(f"   LinkedIn  : {c['company_linkedin_url']}")
         if c.get("job_titles"):
             titles_preview = c["job_titles"][:80]
             print(f"   Roles     : {titles_preview}...")
+        if c.get("posted_dates"):
+            print(f"   Posted    : {c['posted_dates']}")
         if c.get("locations"):
             print(f"   Locations : {c['locations']}")
         print()
