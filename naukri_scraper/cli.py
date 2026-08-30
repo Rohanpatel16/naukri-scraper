@@ -98,8 +98,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "-o", "--output",
-        default="naukri_jobs.csv",
-        help="Output filepath (e.g. jobs.csv or jobs.json)",
+        default="naukri_companies.csv",
+        help="Output filepath (default: naukri_companies.csv)",
     )
     parser.add_argument(
         "-v", "--verbose",
@@ -164,32 +164,28 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     print("-" * 60)
     print(f"[+] Scraping finished in {elapsed:.2f} seconds.")
-    print(f"[+] Total Jobs Collected   : {len(jobs):,}")
+    print(f"[+] Total Jobs Scraped     : {len(jobs):,}")
     print(f"[+] Total Unique Companies : {unique_companies:,}")
-    print(f"[+] Website Resolution Rate: {found_websites:,}/{len(jobs):,} jobs ({pct_web:.1f}% coverage)")
+    print(f"[+] Job Website Coverage   : {found_websites:,}/{len(jobs):,} jobs ({pct_web:.1f}%)")
 
     # Aggregate into unique companies
     companies_data = aggregate_companies(jobs)
     comp_web_count = sum(1 for c in companies_data if c.get("company_website"))
     pct_comp_web = (comp_web_count / len(companies_data) * 100.0) if companies_data else 0.0
 
-    print(f"[+] Companies with Website : {comp_web_count:,}/{len(companies_data):,} ({pct_comp_web:.1f}% company coverage)")
+    print(f"[+] Company Website Rate   : {comp_web_count:,}/{len(companies_data):,} ({pct_comp_web:.1f}% unique companies resolved)")
 
-    # Save results: unique companies sheet is primary, raw jobs sheet is also saved
-    comp_output = args.output if "comp" in args.output.lower() else "naukri_companies.csv"
+    # Save single clean companies file
     if args.output.endswith(".json"):
-        comp_path = save_companies_to_json(companies_data, comp_output.replace(".csv", ".json"))
-        jobs_path = save_to_json(jobs, "naukri_jobs.json")
+        out_path = save_companies_to_json(companies_data, args.output)
     else:
-        comp_path = save_companies_to_csv(companies_data, comp_output)
-        jobs_path = save_to_csv(jobs, "naukri_jobs.csv")
+        out_path = save_companies_to_csv(companies_data, args.output)
 
-    if not jobs:
-        print("[!] No matching jobs found with current filters. Try broader keywords or locations.")
+    if not companies_data:
+        print("[!] No companies found with current filters.")
         return 0
 
-    print(f"\n[+] Unique Companies Sheet saved to : {comp_path.resolve()}")
-    print(f"[+] Full Job Listings Sheet saved to: {jobs_path.resolve()}\n")
+    print(f"\n[+] Results saved to: {out_path.resolve()}\n")
 
     # Display preview of top 5 companies
     print("Top Hiring Companies Preview:")

@@ -57,9 +57,9 @@ jobs:
           HOURS="${{ github.event.inputs.hours }}"
 
           if [ -n "$URL" ]; then
-            CMD="python -m naukri_scraper.cli --url \"$URL\" --output naukri_jobs.csv"
+            CMD="python -m naukri_scraper.cli --url \"$URL\" --output naukri_companies.csv"
           else
-            CMD="python -m naukri_scraper.cli --keywords ${KEYWORDS:-'python'} --output naukri_jobs.csv"
+            CMD="python -m naukri_scraper.cli --keywords ${KEYWORDS:-'python'} --output naukri_companies.csv"
             if [ -n "$LOCATION" ]; then
               CMD="$CMD --location \"$LOCATION\""
             fi
@@ -74,12 +74,10 @@ jobs:
           echo "Running: $CMD"
           eval $CMD
 
-      - name: Upload Scraped CSVs
+      - name: Upload Scraped Companies CSV
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: naukri-scraped-data
-          path: |
-            naukri_companies.csv
-            naukri_jobs.csv
+          name: naukri-companies-csv
+          path: naukri_companies.csv
           retention-days: 30
