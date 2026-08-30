@@ -234,8 +234,9 @@ async def enrich_company_websites_in_browser(
     unique_ab_items = list(url_to_comp.items())
     total_ab = len(unique_ab_items)
 
+    total_companies = len(all_company_names)
     print(f"\n[*] Pure dynamic live enrichment (AmbitionBox Tier 1 + DuckDuckGo Tier 2 + Clearbit Tier 3)...", flush=True)
-    logger.info("Enriching %d unique company websites dynamically...", max(total_ab, len(all_company_names)))
+    logger.info("Enriching %d unique companies (%d have AmbitionBox profiles)...", total_companies, total_ab)
 
     completed = 0
     url_to_website: Dict[str, str] = {}
@@ -296,7 +297,7 @@ async def enrich_company_websites_in_browser(
                     else:
                         status_str = "[Unreachable on AmbitionBox -> checking DuckDuckGo...]"
 
-                    print(f"[{completed}/{total_ab}] {comp_name} -> {status_str}", flush=True)
+                    print(f"[{completed}/{total_companies}] {comp_name} -> {status_str}", flush=True)
                     queue.task_done()
                     await asyncio.sleep(0.05)
 
