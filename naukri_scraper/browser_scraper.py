@@ -28,8 +28,9 @@ from .parser import parse_job_url
 
 logger = logging.getLogger(__name__)
 
-# In-memory runtime cache for company website lookups during the active run (avoids duplicate network queries)
+# In-memory runtime cache for company website & linkedin lookups during the active run
 _COMPANY_WEBSITE_CACHE: Dict[str, str] = {}
+_COMPANY_LINKEDIN_CACHE: Dict[str, str] = {}
 
 
 def clean_html(text: Optional[str]) -> str:
@@ -77,9 +78,15 @@ EXCLUDE_DDGS_DOMAINS = [
 ]
 
 
-def search_website_ddgs_sync(company_name: str) -> str:
-    """Sync helper for DuckDuckGo Search with fallback clean queries."""
-    queries = [f"{company_name} official website"]
+def search_company_details_ddgs_sync(company_name: str) -> Tuple[str, str]:
+    """Sync helper for DuckDuckGo Search extracting (website, linkedin_url)."""
+    website = ""
+    linkedin_url = ""
+
+    queries = [
+        f"{company_name} official website",
+        f"{company_name} linkedin company"
+    ]
 
     clean = re.sub(r"\(.*?\)", "", company_name)
     clean = re.sub(
@@ -98,34 +105,43 @@ def search_website_ddgs_sync(company_name: str) -> str:
         except ImportError:
             from duckduckgo_search import DDGS
     except ImportError:
-        return ""
+        return "", ""
 
     for q in queries:
+        if website and linkedin_url:
+            break
         try:
             with DDGS(timeout=8) as ddgs:
                 results = list(ddgs.text(q, max_results=5))
                 for r in results:
                     url = r.get("href", "")
-                    if not url or any(ex in url.lower() for ex in EXCLUDE_DDGS_DOMAINS):
+                    if not url:
                         continue
-                    parsed = urllib.parse.urlparse(url)
-                    if parsed.scheme and parsed.netloc:
-                        return f"{parsed.scheme}://{parsed.netloc}"
+
+                    # Extract LinkedIn company URL
+                    if "linkedin.com/company/" in url.lower() and not linkedin_url:
+                        linkedin_url = url.split("?")[0].rstrip("/")
+
+                    # Extract official website
+                    if not website and not any(ex in url.lower() for ex in EXCLUDE_DDGS_DOMAINS):
+                        parsed = urllib.parse.urlparse(url)
+                        if parsed.scheme and parsed.netloc:
+                            website = f"{parsed.scheme}://{parsed.netloc}"
         except Exception:
             pass
 
-    return ""
+    return website, linkedin_url
 
 
 async def dynamic_extract_ddgs(
     company_name: str,
     semaphore: asyncio.Semaphore,
-) -> Tuple[str, str]:
-    """Queries DuckDuckGo Search as Tier 2 fallback."""
+) -> Tuple[str, str, str]:
+    """Queries DuckDuckGo Search for website and LinkedIn URL."""
     async with semaphore:
         loop = asyncio.get_running_loop()
-        web = await loop.run_in_executor(None, search_website_ddgs_sync, company_name)
-        return company_name, web
+        web, li = await loop.run_in_executor(None, search_company_details_ddgs_sync, company_name)
+        return company_name, web, li
 
 
 async def dynamic_extract_clearbit(
@@ -161,18 +177,19 @@ async def dynamic_extract_clearbit(
         return company_name, ""
 
 
-async def dynamic_extract_ambitionbox(page: Page, url: str) -> tuple[str, bool]:
+async def dynamic_extract_ambitionbox(page: Page, url: str) -> tuple[str, str, bool]:
     """Pure dynamic extraction from AmbitionBox page.
     
     Returns:
-        (website_url, is_page_detected_and_valid)
+        (website_url, linkedin_url, is_page_detected_and_valid)
     """
     website = ""
+    linkedin_url = ""
     page_loaded = False
     try:
         resp = await page.goto(url, wait_until="domcontentloaded", timeout=15000)
         if resp and resp.status == 404:
-            return ("", True)  # Confirmed page doesn't exist
+            return ("", "", True)  # Confirmed page doesn't exist
 
         for _ in range(25):
             html_text = await page.content()
@@ -188,6 +205,10 @@ async def dynamic_extract_ambitionbox(page: Page, url: str) -> tuple[str, bool]:
                         if raw_w and isinstance(raw_w, str) and raw_w.strip():
                             raw_w = raw_w.strip()
                             website = f"https://{raw_w}" if not raw_w.startswith("http") else raw_w
+
+                        raw_li = meta.get("linkedinUrl") or meta.get("linkedin") or ""
+                        if raw_li and isinstance(raw_li, str) and "linkedin.com/company/" in raw_li:
+                            linkedin_url = raw_li.split("?")[0].rstrip("/")
                     except Exception:
                         pass
 
@@ -196,14 +217,19 @@ async def dynamic_extract_ambitionbox(page: Page, url: str) -> tuple[str, bool]:
                     if web_m:
                         website = web_m.group(1).replace("\\/", "").strip()
 
+                if not linkedin_url:
+                    li_m = re.search(r'https?://[a-z]{2,3}\.linkedin\.com/company/[a-zA-Z0-9_\-]+', html_text)
+                    if li_m:
+                        linkedin_url = li_m.group(0).split("?")[0].rstrip("/")
+
                 if website:
                     break
             await asyncio.sleep(0.1)
 
     except Exception:
-        return ("", False)
+        return ("", "", False)
 
-    return (website, page_loaded)
+    return (website, linkedin_url, page_loaded)
 
 
 async def enrich_company_websites_in_browser(
@@ -214,7 +240,7 @@ async def enrich_company_websites_in_browser(
 ) -> None:
     """Pure dynamic live enrichment with three-tier strategy:
     1. Primary (Tier 1): AmbitionBox live extraction via concurrent browser tabs.
-    2. Fallback 1 (Tier 2): DuckDuckGo Search (ddgs) for unlisted/missing companies.
+    2. Fallback 1 (Tier 2): DuckDuckGo Search (ddgs) for unlisted/missing companies & LinkedIn URLs.
     3. Fallback 2 (Tier 3): Clearbit Autocomplete API for remaining missing companies.
     - 100% pure dynamic, 0% hardcoding.
     """
@@ -237,16 +263,22 @@ async def enrich_company_websites_in_browser(
 
     completed = 0
     url_to_website: Dict[str, str] = {}
+    url_to_linkedin: Dict[str, str] = {}
     comp_to_website: Dict[str, str] = {}
+    comp_to_linkedin: Dict[str, str] = {}
     remaining_to_fetch: List[tuple[str, str]] = []
 
     # Check runtime cache first
     for ab_url, comp_name in unique_ab_items:
-        if ab_url in _COMPANY_WEBSITE_CACHE:
-            cached_w = _COMPANY_WEBSITE_CACHE[ab_url]
+        cached_w = _COMPANY_WEBSITE_CACHE.get(ab_url)
+        cached_li = _COMPANY_LINKEDIN_CACHE.get(ab_url)
+        if cached_w is not None:
             url_to_website[ab_url] = cached_w
             if cached_w:
                 comp_to_website[comp_name] = cached_w
+            if cached_li:
+                url_to_linkedin[ab_url] = cached_li
+                comp_to_linkedin[comp_name] = cached_li
             completed += 1
         else:
             remaining_to_fetch.append((ab_url, comp_name))
@@ -280,11 +312,15 @@ async def enrich_company_websites_in_browser(
                     except asyncio.QueueEmpty:
                         break
 
-                    website, is_detected = await dynamic_extract_ambitionbox(page, ab_url)
+                    website, linkedin_url, is_detected = await dynamic_extract_ambitionbox(page, ab_url)
                     _COMPANY_WEBSITE_CACHE[ab_url] = website
+                    _COMPANY_LINKEDIN_CACHE[ab_url] = linkedin_url
                     url_to_website[ab_url] = website
+                    url_to_linkedin[ab_url] = linkedin_url
                     if website:
                         comp_to_website[comp_name] = website
+                    if linkedin_url:
+                        comp_to_linkedin[comp_name] = linkedin_url
                     completed += 1
 
                     if website:
@@ -317,17 +353,20 @@ async def enrich_company_websites_in_browser(
         except asyncio.TimeoutError:
             print(f"[!] Reached max AmbitionBox time limit ({max_enrichment_seconds}s); continuing to fallbacks...", flush=True)
 
-    # --- Phase 2 (Tier 2): DuckDuckGo Search Fallback ---
-    unresolved_companies = [c for c in all_company_names if not comp_to_website.get(c)]
+    # --- Phase 2 (Tier 2): DuckDuckGo Search Fallback (Website & LinkedIn) ---
+    unresolved_companies = [c for c in all_company_names if not comp_to_website.get(c) or not comp_to_linkedin.get(c)]
     if unresolved_companies:
         print(f"\n[*] Querying DuckDuckGo Search (Tier 2 fallback) for {len(unresolved_companies)} companies...", flush=True)
         ddgs_semaphore = asyncio.Semaphore(6)
         tasks = [dynamic_extract_ddgs(c, ddgs_semaphore) for c in unresolved_companies]
         for coro in asyncio.as_completed(tasks):
-            cname, ddgs_web = await coro
-            if ddgs_web:
+            cname, ddgs_web, ddgs_li = await coro
+            if ddgs_web and not comp_to_website.get(cname):
                 comp_to_website[cname] = ddgs_web
-                print(f"  [+] DuckDuckGo Found: {cname} -> {ddgs_web}", flush=True)
+                print(f"  [+] DuckDuckGo Website Found: {cname} -> {ddgs_web}", flush=True)
+            if ddgs_li and not comp_to_linkedin.get(cname):
+                comp_to_linkedin[cname] = ddgs_li
+                print(f"  [+] DuckDuckGo LinkedIn Found: {cname} -> {ddgs_li}", flush=True)
 
     # --- Phase 3 (Tier 3): Clearbit Autocomplete API Fallback ---
     still_unresolved = [c for c in all_company_names if not comp_to_website.get(c)]
@@ -341,25 +380,30 @@ async def enrich_company_websites_in_browser(
                 tasks = [dynamic_extract_clearbit(http_client, c, cb_semaphore) for c in still_unresolved]
                 for coro in asyncio.as_completed(tasks):
                     cname, clearbit_web = await coro
-                    if clearbit_web:
+                    if clearbit_web and not comp_to_website.get(cname):
                         comp_to_website[cname] = clearbit_web
-                        print(f"  [+] Clearbit Found: {cname} -> {clearbit_web}", flush=True)
+                        print(f"  [+] Clearbit Website Found: {cname} -> {clearbit_web}", flush=True)
         except Exception:
             pass
 
-    # Assign enriched websites back to all matching jobs
-    found_count = 0
+    # Assign enriched websites and LinkedIn URLs back to all matching jobs
+    found_web_count = 0
+    found_li_count = 0
     for job in jobs:
         cname = (job.get("company") or "").strip()
         ab_url = job.get("ambition_box_url", "")
         
         # Priority: Direct company resolution, then AmbitionBox URL resolution
         web = comp_to_website.get(cname) or url_to_website.get(ab_url) or ""
+        li_url = comp_to_linkedin.get(cname) or url_to_linkedin.get(ab_url) or ""
         job["company_website"] = web
+        job["company_linkedin_url"] = li_url
         if web:
-            found_count += 1
+            found_web_count += 1
+        if li_url:
+            found_li_count += 1
 
-    print(f"\n[+] Finished website enrichment ({found_count}/{len(jobs)} jobs resolved with official websites).\n", flush=True)
+    print(f"\n[+] Finished enrichment: {found_web_count}/{len(jobs)} websites, {found_li_count}/{len(jobs)} LinkedIn URLs resolved.\n", flush=True)
 
 
 class NaukriBrowserScraper:
@@ -522,6 +566,7 @@ class NaukriBrowserScraper:
                         "title": title,
                         "company": company,
                         "company_website": "",
+                        "company_linkedin_url": "",
                         "location": location,
                         "experience_text": exp_text,
                         "salary": salary,
@@ -576,6 +621,7 @@ class NaukriBrowserScraper:
                             "title": (await title_el.inner_text()).strip(),
                             "company": (await comp_el.inner_text()).strip() if comp_el else "",
                             "company_website": "",
+                            "company_linkedin_url": "",
                             "location": (await loc_el.inner_text()).strip() if loc_el else "India",
                             "experience_text": (await exp_el.inner_text()).strip() if exp_el else "Not specified",
                             "salary": (await sal_el.inner_text()).strip() if sal_el else "Not disclosed",
