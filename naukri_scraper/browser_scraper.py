@@ -300,17 +300,26 @@ class NaukriBrowserScraper:
         self.num_workers = max(1, num_workers)
 
     def _build_page_url(self, base_url: str, page_num: int) -> str:
-        """Construct paginated URL for Naukri search."""
+        """Construct paginated URL for Naukri search.
+        
+        Handles both clean path URLs (/jobs-in-mumbai -> /jobs-in-mumbai-2)
+        and query-based URLs (tech-lead-jobs-in-india?k=... -> tech-lead-jobs-in-india?k=...&pageNo=2)
+        without causing router redirect resets.
+        """
         if page_num <= 1:
             return base_url
 
-        if "?" in base_url:
-            path, query = base_url.split("?", 1)
-            path = re.sub(r"-\d+$", "", path)
-            return f"{path}-{page_num}?{query}"
+        parsed = urllib.parse.urlparse(base_url)
+        query_dict = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+
+        if query_dict or "?" in base_url:
+            query_dict["pageNo"] = [str(page_num)]
+            new_query = urllib.parse.urlencode(query_dict, doseq=True)
+            return urllib.parse.urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_query, parsed.fragment))
         else:
-            path = re.sub(r"-\d+$", "", base_url)
-            return f"{path}-{page_num}"
+            clean_path = re.sub(r"-\d+$", "", parsed.path)
+            new_path = f"{clean_path}-{page_num}"
+            return urllib.parse.urlunparse((parsed.scheme, parsed.netloc, new_path, parsed.params, parsed.query, parsed.fragment))
 
     async def _scrape_tab_worker(
         self,
