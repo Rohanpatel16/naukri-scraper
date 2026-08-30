@@ -69,12 +69,71 @@ def clean_company_queries(name: str) -> List[str]:
     return candidates
 
 
+EXCLUDE_DDGS_DOMAINS = [
+    "linkedin.com", "facebook.com", "twitter.com", "x.com", "instagram.com", "youtube.com",
+    "glassdoor", "ambitionbox", "naukri", "indeed", "zaubacorp", "tofler", "crunchbase",
+    "zoominfo", "owler", "wikipedia.org", "justdial.com", "indiamart.com", "tradeindia.com",
+    "tracxn.com", "companydetails.in", "bing.com", "google.com", "github.com", "play.google.com"
+]
+
+
+def search_website_ddgs_sync(company_name: str) -> str:
+    """Sync helper for DuckDuckGo Search with fallback clean queries."""
+    queries = [f"{company_name} official website"]
+
+    clean = re.sub(r"\(.*?\)", "", company_name)
+    clean = re.sub(
+        r"\b(pvt\.?|private|ltd\.?|limited|llc|inc\.?|corp\.?|corporation|group|services|enterprises|technologies|solutions)\b",
+        "",
+        clean,
+        flags=re.IGNORECASE,
+    ).strip()
+    clean = re.sub(r"\s+", " ", clean).strip()
+    if clean and clean.lower() != company_name.lower() and len(clean) > 2:
+        queries.append(f"{clean} official website")
+
+    try:
+        try:
+            from ddgs import DDGS
+        except ImportError:
+            from duckduckgo_search import DDGS
+    except ImportError:
+        return ""
+
+    for q in queries:
+        try:
+            with DDGS(timeout=8) as ddgs:
+                results = list(ddgs.text(q, max_results=5))
+                for r in results:
+                    url = r.get("href", "")
+                    if not url or any(ex in url.lower() for ex in EXCLUDE_DDGS_DOMAINS):
+                        continue
+                    parsed = urllib.parse.urlparse(url)
+                    if parsed.scheme and parsed.netloc:
+                        return f"{parsed.scheme}://{parsed.netloc}"
+        except Exception:
+            pass
+
+    return ""
+
+
+async def dynamic_extract_ddgs(
+    company_name: str,
+    semaphore: asyncio.Semaphore,
+) -> Tuple[str, str]:
+    """Queries DuckDuckGo Search as Tier 2 fallback."""
+    async with semaphore:
+        loop = asyncio.get_running_loop()
+        web = await loop.run_in_executor(None, search_website_ddgs_sync, company_name)
+        return company_name, web
+
+
 async def dynamic_extract_clearbit(
     client: Any,
     company_name: str,
     semaphore: asyncio.Semaphore,
 ) -> Tuple[str, str]:
-    """Queries Clearbit Autocomplete API as a fast dynamic fallback."""
+    """Queries Clearbit Autocomplete API as a fast dynamic fallback (Tier 3)."""
     async with semaphore:
         queries = clean_company_queries(company_name)
         headers = {
@@ -153,9 +212,10 @@ async def enrich_company_websites_in_browser(
     num_tabs: int = 3,
     max_enrichment_seconds: float = 180.0,
 ) -> None:
-    """Pure dynamic live enrichment with two-tier strategy:
-    1. Primary: AmbitionBox live extraction via concurrent browser tabs.
-    2. Fallback: Clearbit Autocomplete API for unlisted or missing websites.
+    """Pure dynamic live enrichment with three-tier strategy:
+    1. Primary (Tier 1): AmbitionBox live extraction via concurrent browser tabs.
+    2. Fallback 1 (Tier 2): DuckDuckGo Search (ddgs) for unlisted/missing companies.
+    3. Fallback 2 (Tier 3): Clearbit Autocomplete API for remaining missing companies.
     - 100% pure dynamic, 0% hardcoding.
     """
     url_to_comp: Dict[str, str] = {}
@@ -172,7 +232,7 @@ async def enrich_company_websites_in_browser(
     unique_ab_items = list(url_to_comp.items())
     total_ab = len(unique_ab_items)
 
-    print(f"\n[*] Pure dynamic live enrichment (AmbitionBox primary + Clearbit fallback)...", flush=True)
+    print(f"\n[*] Pure dynamic live enrichment (AmbitionBox Tier 1 + DuckDuckGo Tier 2 + Clearbit Tier 3)...", flush=True)
     logger.info("Enriching %d unique company websites dynamically...", max(total_ab, len(all_company_names)))
 
     completed = 0
@@ -191,7 +251,7 @@ async def enrich_company_websites_in_browser(
         else:
             remaining_to_fetch.append((ab_url, comp_name))
 
-    # --- Phase 1: AmbitionBox Concurrent Extraction ---
+    # --- Phase 1 (Tier 1): AmbitionBox Concurrent Extraction ---
     if remaining_to_fetch:
         queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue()
         for item in remaining_to_fetch:
@@ -230,9 +290,9 @@ async def enrich_company_websites_in_browser(
                     if website:
                         status_str = f"{website} (AmbitionBox)"
                     elif is_detected:
-                        status_str = "[Not listed on AmbitionBox -> checking Clearbit...]"
+                        status_str = "[Not listed on AmbitionBox -> checking DuckDuckGo...]"
                     else:
-                        status_str = "[Unreachable on AmbitionBox -> checking Clearbit...]"
+                        status_str = "[Unreachable on AmbitionBox -> checking DuckDuckGo...]"
 
                     print(f"[{completed}/{total_ab}] {comp_name} -> {status_str}", flush=True)
                     queue.task_done()
@@ -255,19 +315,30 @@ async def enrich_company_websites_in_browser(
                 timeout=max_enrichment_seconds,
             )
         except asyncio.TimeoutError:
-            print(f"[!] Reached max AmbitionBox time limit ({max_enrichment_seconds}s); checking Clearbit fallback...", flush=True)
+            print(f"[!] Reached max AmbitionBox time limit ({max_enrichment_seconds}s); continuing to fallbacks...", flush=True)
 
-    # --- Phase 2: Clearbit Fallback for Missing Websites ---
+    # --- Phase 2 (Tier 2): DuckDuckGo Search Fallback ---
     unresolved_companies = [c for c in all_company_names if not comp_to_website.get(c)]
     if unresolved_companies:
-        print(f"\n[*] Querying Clearbit Autocomplete API fallback for {len(unresolved_companies)} companies...", flush=True)
-        semaphore = asyncio.Semaphore(10)
+        print(f"\n[*] Querying DuckDuckGo Search (Tier 2 fallback) for {len(unresolved_companies)} companies...", flush=True)
+        ddgs_semaphore = asyncio.Semaphore(6)
+        tasks = [dynamic_extract_ddgs(c, ddgs_semaphore) for c in unresolved_companies]
+        for coro in asyncio.as_completed(tasks):
+            cname, ddgs_web = await coro
+            if ddgs_web:
+                comp_to_website[cname] = ddgs_web
+                print(f"  [+] DuckDuckGo Found: {cname} -> {ddgs_web}", flush=True)
 
+    # --- Phase 3 (Tier 3): Clearbit Autocomplete API Fallback ---
+    still_unresolved = [c for c in all_company_names if not comp_to_website.get(c)]
+    if still_unresolved:
+        print(f"\n[*] Querying Clearbit Autocomplete API (Tier 3 fallback) for {len(still_unresolved)} companies...", flush=True)
+        cb_semaphore = asyncio.Semaphore(10)
         try:
             import httpx
             limits = httpx.Limits(max_keepalive_connections=15, max_connections=20)
             async with httpx.AsyncClient(limits=limits, follow_redirects=True) as http_client:
-                tasks = [dynamic_extract_clearbit(http_client, c, semaphore) for c in unresolved_companies]
+                tasks = [dynamic_extract_clearbit(http_client, c, cb_semaphore) for c in still_unresolved]
                 for coro in asyncio.as_completed(tasks):
                     cname, clearbit_web = await coro
                     if clearbit_web:
