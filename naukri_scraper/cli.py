@@ -147,9 +147,15 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     elapsed = time.time() - start_time
 
+    found_websites = sum(1 for j in jobs if j.get("company_website"))
+    unique_companies = len(set(j.get("company") for j in jobs if (j.get("company") or "").strip()))
+    pct_web = (found_websites / len(jobs) * 100.0) if jobs else 0.0
+
     print("-" * 60)
     print(f"[+] Scraping finished in {elapsed:.2f} seconds.")
-    print(f"[+] Total Matching Jobs Found: {len(jobs)}")
+    print(f"[+] Total Jobs Collected   : {len(jobs):,}")
+    print(f"[+] Total Unique Companies : {unique_companies:,}")
+    print(f"[+] Website Resolution Rate: {found_websites:,}/{len(jobs):,} jobs ({pct_web:.1f}% coverage)")
 
     # Save results
     if args.output.endswith(".json"):
@@ -161,7 +167,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("[!] No matching jobs found with current filters. Try broader keywords or locations.")
         return 0
 
-    print(f"[+] Results saved to: {out_path.resolve()}\n")
+    print(f"\n[+] Results saved to: {out_path.resolve()}\n")
 
     # Display preview of top 5 jobs
     print("Top Matches Preview:")

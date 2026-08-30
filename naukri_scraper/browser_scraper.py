@@ -368,7 +368,22 @@ async def enrich_company_websites_in_browser(
         if web:
             found_web_count += 1
 
-    print(f"\n[+] Finished enrichment: {found_web_count}/{len(jobs)} websites resolved.\n", flush=True)
+    total_jobs = len(jobs)
+    pct_jobs = (found_web_count / total_jobs * 100.0) if total_jobs > 0 else 0.0
+    total_companies = len(all_company_names)
+    companies_found = sum(1 for c in all_company_names if comp_to_website.get(c))
+    pct_companies = (companies_found / total_companies * 100.0) if total_companies > 0 else 0.0
+
+    print(
+        f"\n============================================================\n"
+        f"[+] ENRICHMENT STATS:\n"
+        f"    • Total Jobs Collected     : {total_jobs:,}\n"
+        f"    • Total Unique Companies   : {total_companies:,}\n"
+        f"    • Company Websites Found   : {companies_found}/{total_companies} ({pct_companies:.1f}% coverage)\n"
+        f"    • Jobs with Valid Website  : {found_web_count}/{total_jobs} ({pct_jobs:.1f}%)\n"
+        f"============================================================\n",
+        flush=True,
+    )
 
 
 class NaukriBrowserScraper:
@@ -407,8 +422,11 @@ class NaukriBrowserScraper:
         page_numbers: List[int],
         search_url: str,
         context: BrowserContext,
+        search_meta: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
         """Worker task to scrape a subset of pages on its own tab."""
+        if search_meta is None:
+            search_meta = {}
         page: Page = await context.new_page()
 
         # Abort images and media for fast network performance
@@ -430,6 +448,10 @@ class NaukriBrowserScraper:
             if "jobapi/v3/search" in response.url or "jobapi" in response.url:
                 try:
                     payload = await response.json()
+                    total_count = payload.get("noOfJobs")
+                    if total_count is not None and "total_jobs_on_site" not in search_meta:
+                        search_meta["total_jobs_on_site"] = total_count
+                        print(f"[*] Total Matching Jobs on Naukri: {total_count:,} jobs available\n", flush=True)
                     jobs = payload.get("jobDetails", [])
                     if jobs:
                         latest_page_jobs.extend(jobs)
@@ -663,8 +685,9 @@ class NaukriBrowserScraper:
             all_page_nums = list(range(1, max_pages + 1))
             worker_partitions = [all_page_nums[i::actual_workers] for i in range(actual_workers)]
 
+            search_meta: Dict[str, Any] = {}
             tasks = [
-                self._scrape_tab_worker(w_idx + 1, parts, search_url, context)
+                self._scrape_tab_worker(w_idx + 1, parts, search_url, context, search_meta)
                 for w_idx, parts in enumerate(worker_partitions)
             ]
 
