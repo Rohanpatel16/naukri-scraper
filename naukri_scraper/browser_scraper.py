@@ -718,10 +718,10 @@ class NaukriBrowserScraper:
 
                 total_available = search_meta.get("total_jobs_on_site")
                 if total_available:
-                    target_pages = min(100, max(1, (total_available + 19) // 20))
-                    print(f"[*] Auto-detected {total_available:,} jobs across {target_pages} search pages. Scraping all available pages...\n", flush=True)
+                    target_pages = max(1, (total_available + 19) // 20)
+                    print(f"[*] Auto-detected {total_available:,} jobs → scraping {target_pages} pages to collect all...\n", flush=True)
                 else:
-                    target_pages = 100
+                    target_pages = 200
 
                 if target_pages > 1 and len(all_jobs) < effective_max_jobs:
                     remaining_page_nums = list(range(2, target_pages + 1))
