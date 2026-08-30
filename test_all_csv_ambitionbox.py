@@ -1,6 +1,6 @@
-"""Test all 1644 jobs in naukri_jobs.csv with the AmbitionBox website enrichment engine.
+"""Pure Dynamic Test Tool for all 1644 jobs in naukri_jobs.csv.
 
-Measures accuracy, speed, and populates the CSV.
+Extracts company websites live from AmbitionBox with 0% hardcoding.
 """
 
 import asyncio
@@ -12,7 +12,6 @@ from typing import Any, Dict, List
 
 from playwright.async_api import async_playwright
 from naukri_scraper.browser_scraper import (
-    KNOWN_COMPANY_DOMAINS,
     _COMPANY_WEBSITE_CACHE,
     enrich_company_websites_in_browser,
 )
@@ -30,7 +29,7 @@ async def main():
         jobs: List[Dict[str, Any]] = list(reader)
 
     print("=" * 70)
-    print(f"[*] TESTING AMBITIONBOX WEBSITE ENRICHMENT ON {len(jobs)} JOBS IN CSV")
+    print(f"[*] PURE DYNAMIC LIVE ENRICHMENT (0% HARDCODING) ON {len(jobs)} JOBS")
     print("=" * 70)
 
     url_to_comp: Dict[str, str] = {}
@@ -82,7 +81,7 @@ async def main():
             jobs,
             context,
             num_tabs=3,
-            max_enrichment_seconds=120.0,
+            max_enrichment_seconds=180.0,
         )
 
         try:

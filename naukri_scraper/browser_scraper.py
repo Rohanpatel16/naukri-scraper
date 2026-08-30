@@ -1,12 +1,12 @@
 """High-Performance Async Multi-Tab Browser Scraper for Naukri.com.
 
 Optimized for high speed, stability on cloud CI/CD runners (GitHub Actions / Linux),
-and local environments with 100% data fidelity:
+and local environments with 100% pure dynamic data extraction:
 - Async parallel multi-tab search scraping
 - Stealth browser flags & anti-automation evasion
-- Built-in instant resolution for top 100+ major employers (0ms latency)
-- Paced live tab enrichment for remaining companies with live terminal progress
-- Hard timeouts and clean resource disposal (guaranteed zero hangs)
+- 100% pure dynamic live AmbitionBox website extraction (zero hardcoding)
+- Accurate detection of listed websites vs companies without a website on AmbitionBox
+- Robust route blocking, hard timeouts, and clean resource disposal (guaranteed zero hangs)
 """
 
 from __future__ import annotations
@@ -27,277 +27,8 @@ from .parser import parse_job_url
 
 logger = logging.getLogger(__name__)
 
-# Global cache for company website lookups across runs/batches
+# In-memory runtime cache for company website lookups during the active run (avoids duplicate network queries)
 _COMPANY_WEBSITE_CACHE: Dict[str, str] = {}
-
-# Instant domain registry for prominent employers in India (0ms lookup, zero network calls)
-KNOWN_COMPANY_DOMAINS: Dict[str, str] = {
-    "2coms": "https://www.2coms.com/",
-    "academian india": "https://academian.com/",
-    "accelirate softech": "https://www.accelirate.com/",
-    "accenture": "https://www.accenture.com/",
-    "acl digital": "https://www.acldigital.com/",
-    "adani": "https://www.adani.com/",
-    "adani group": "https://www.adani.com/",
-    "airtel": "https://www.airtel.in/",
-    "airtel payments bank": "https://www.airtelpayments.bank.in/",
-    "ais business solution": "https://www.americaninfosource.com/",
-    "alaric ventures": "https://www.alaricventures.com/",
-    "algoleap technologies": "https://www.algoleap.com",
-    "allied digital": "https://www.allieddigital.net",
-    "allscripts(india) llp, ultimately a subsidiary of altera digital health inc.,[altera india]": "https://veradigm.com/",
-    "amar ujala": "https://www.amarujala.com/",
-    "amazon": "https://www.amazon.jobs/",
-    "amneal pharmaceuticals": "https://www.amneal.com",
-    "andor tech": "http://www.andortech.com",
-    "aon": "https://www.aon.com",
-    "apa engineering": "https://www.apaengineering.com",
-    "apexon": "https://www.apexon.com/",
-    "app innovation technologies": "https://www.aitechindia.com/",
-    "apptad": "https://apptad.com/",
-    "ascent e digit solutions": "http://www.aedindia.com/",
-    "aspire systems": "https://www.aspiresys.com",
-    "atria convergence technologies (act)": "https://www.actcorp.in/",
-    "bajaj finance": "https://www.bajajfinserv.in/",
-    "bharti airtel": "https://www.airtel.in/",
-    "birlasoft": "https://www.birlasoft.com/",
-    "bitcot technologies": "https://www.bitcot.com/",
-    "bitsilica": "https://www.bitsilica.com/",
-    "bobcard": "http://www.bobcard.co.in/",
-    "boldtek": "https://www.boldtek.com/",
-    "bounteous": "https://www.bounteous.com/",
-    "bridgenext": "https://www.bridgenext.com/",
-    "ca one tech": "http://www.ca-one.com/",
-    "calsoft": "https://calsoftinc.com/",
-    "capgemini": "https://www.capgemini.com/",
-    "cargill": "https://www.cargill.com/",
-    "ceil": "https://vishalexpert.com/",
-    "celusion technologies": "https://www.celusion.com",
-    "centroid": "https://www.centroidcnc.com",
-    "cgi": "https://www.cgi.com/india/en/",
-    "cisco": "https://www.cisco.com/",
-    "cloudxtreme": "https://www.cloudxtreme.info/",
-    "cms it services": "https://www.cmsitservices.com/",
-    "coforge": "https://www.coforge.com/",
-    "cognizant": "https://www.cognizant.com/",
-    "cognizant technology solutions": "https://www.cognizant.com/",
-    "colortokens": "https://colortokens.com/",
-    "cyber managers software services": "https://www.cmss.in/",
-    "cyient": "https://www.cyient.com/",
-    "datamark bpo service": "https://www.datamark.net",
-    "datamatics": "https://www.datamatics.com/",
-    "dell": "https://www.dell.com/",
-    "dell technologies": "https://www.dell.com/",
-    "deloitte": "https://www.deloitte.com/",
-    "deloitte shared services india": "https://www.deloitte.com/ui/en/careers/careers.html?icid=top_careers&id=ui:2or:3or:4usirbmfy27:5:6car:20260730::usicarnaukri",
-    "deloitte us-india offices": "https://www.deloitte.com/ui/en/careers/careers.html?icid=top_careers&id=ui:2or:3or:4usirbmfy27:5:6car:20260730::usicarnaukri",
-    "dinesh engineers": "https://www.depl.co.in",
-    "doyen infosolutions": "https://www.doyen.co.in",
-    "easemytrip": "https://www.easemytrip.com/",
-    "eclat health solutions": "https://www.eclathealth.com",
-    "eclerx": "https://eclerx.com/",
-    "eclerx services": "https://eclerx.com/",
-    "edgeverve systems": "https://www.edgeverve.com/",
-    "eisneramper": "https://www.eisneramper.com/",
-    "embarkgcc services": "https://embarkgrp.com/",
-    "embitel technologies": "https://www.embitel.com/",
-    "emids technologies": "https://www.emids.com/",
-    "emsec": "https://www.emsec.uk/",
-    "epam": "https://www.epam.com/",
-    "epam systems": "https://www.epam.com/",
-    "epiroc mining india": "https://www.epiroc.com/en-in",
-    "equiniti india": "https://www.equiniti-india.com/",
-    "ernst & young": "https://www.ey.com/",
-    "eruvaka technologies": "https://www.eruvaka.com",
-    "evolute group": "https://www.evolute.in/",
-    "expert solution technologies": "https://expsoltech.com/",
-    "expleo": "https://expleo.com/",
-    "ey": "https://www.ey.com/",
-    "ez-xbrl solutions": "https://www.ez-xbrl.com",
-    "feuji software solutions": "https://www.feuji.com/",
-    "finastra": "https://www.finastra.com/",
-    "fis": "http://www.fisglobal.com/",
-    "fractal analytics": "https://fractal.ai/",
-    "galaxy health insurance company": "https://www.galaxyhealth.com/",
-    "ganpat university": "https://www.ganpatuniversity.ac.in",
-    "geak minds": "https://geakminds.com/",
-    "google": "https://careers.google.com/",
-    "grazitti interactive": "https://www.grazitti.com/",
-    "gruve": "https://www.gruve.ai/",
-    "gsr business services": "https://www.gsr-inc.com",
-    "gtpl kcbpl": "http://www.gtplkcbpl.com",
-    "hamon technologies": "https://hamon.in/",
-    "han river technology": "https://www.hanriver.co",
-    "happiest minds": "https://www.happiestminds.com/",
-    "happiest minds technologies": "https://www.happiestminds.com/",
-    "harbinger systems": "https://www.harbinger-systems.com",
-    "hcl technologies": "https://www.hcltech.com/",
-    "hcltech": "https://www.hcltech.com/",
-    "hexaware": "https://www.hexaware.com/",
-    "hexaware technologies": "https://www.hexaware.com/",
-    "highspring india llp": "http://vacobinary.in/",
-    "hinduja tech": "https://hindujatech.com/",
-    "honeybee tech solutions": "http://honeybeetechsolutions.com/",
-    "hp": "https://www.hp.com/",
-    "hurix": "https://www.hurix.com/",
-    "hype marketer": "https://www.tranzindia.in/",
-    "hyundai autoever": "https://www.hyundai-autoever.com",
-    "ibm": "https://www.ibm.com/",
-    "id softsource": "https://idsoftsource.com/",
-    "impressico business solutions": "https://www.impressico.com/",
-    "inceptive consulting": "http://inceptive.consulting/",
-    "indus towers": "https://www.industowers.com",
-    "infinite": "https://www.infinite.com/",
-    "infosys": "https://www.infosys.com/",
-    "infotel it consulting": "http://www.infotel.in/",
-    "infovision labs": "http://www.infovision.com/",
-    "inspirisys": "https://www.inspirisys.com/",
-    "intel": "https://www.intel.com/",
-    "intellics global services": "https://intellicsglobal.com/",
-    "intrics solutions": "https://rdsolutions.io/",
-    "invisia bpo solutions": "https://www.invisia.us/",
-    "iq-eq": "https://iqeq.com/",
-    "iqdynamics technologies": "https://www.iqdynamics.com/",
-    "jio": "https://www.jio.com/",
-    "kairos technologies": "https://www.kairostech.com/",
-    "kaizen infotech": "https://www.kaizeninfotech.co.in",
-    "kapil group": "https://www.kapilgroup.com",
-    "kapitus strategy services": "https://kapitus.com",
-    "kellton": "https://www.kellton.com/",
-    "kg information systems (kgisl)": "https://www.kgisl.com",
-    "kiya.ai": "https://www.kiya.ai/",
-    "kochasoft": "https://kochasoft.com/",
-    "kpmg": "https://www.kpmg.com/",
-    "l&t": "https://www.larsentoubro.com/",
-    "larsen & toubro": "https://www.larsentoubro.com/",
-    "larsen & toubro (l&t)": "https://www.larsentoubro.com/",
-    "lenovo": "https://www.lenovo.com/",
-    "lti": "https://www.ltimindtree.com/",
-    "ltimindtree": "https://www.ltimindtree.com/",
-    "ltm": "https://www.ltm.com/",
-    "mastek": "https://www.mastek.com/",
-    "matrix business services": "http://www.matrixbsindia.com/",
-    "maveric": "http://www.maveric-systems.com/careers",
-    "mergen infotech": "https://mergeninfotech.com/",
-    "merit data and technology": "https://www.meritdata-tech.com/",
-    "microsoft": "https://www.microsoft.com/",
-    "milestone technologies": "https://milestone.tech/",
-    "mindshare": "https://www.mindshareworld.com/",
-    "mindtree": "https://www.ltimindtree.com/",
-    "miraki tech": "http://www.mirakitech.com",
-    "mizuho global services": "https://www.mizuhogroup.com/asia-pacific/mizuho-global-services",
-    "movate technologies": "https://www.movate.com/",
-    "mphasis": "https://www.mphasis.com/",
-    "myezcare": "https://www.myezcare.com/",
-    "nagarro": "https://www.nagarro.com/",
-    "national institute for smart government (nisg)": "http://www.nisg.org",
-    "ndx financial services": "https://ndxfinserv.com/",
-    "nec corporation": "https://in.nec.com/",
-    "neogen chemicals": "https://neogenchem.com/",
-    "netedge computing solutions": "https://www.netedgecomputing.com/",
-    "neurealm": "https://www.neurealm.com/",
-    "newt global": "https://www.newtglobal.com",
-    "nielseniq india": "https://nielseniq.com/global/en/",
-    "nokia": "https://www.nokia.com/",
-    "nous infosystems": "https://www.nousinfosystems.com",
-    "novel office": "https://www.noveloffice.in",
-    "ntt data": "https://services.global.ntt/en-us/",
-    "ntt data, inc.": "https://services.global.ntt/en-us/",
-    "nvidia": "https://www.nvidia.com/",
-    "nysa biomed": "https://nysabiomed.com/",
-    "odessa": "https://www.odessainc.com/",
-    "opentext": "https://www.opentext.com/",
-    "optimum solutions": "https://theoptimum.net/",
-    "oracle": "https://www.oracle.com/",
-    "orange business services": "https://www.orange-business.com/en",
-    "orion systems": "https://www.orioninc.com/",
-    "osi digital": "https://www.osidigital.com/",
-    "ovivo india": "https://www.ovivowater.com/en/",
-    "p3 design solutions": "http://www.p3designsolutions.com/",
-    "paradigm realty": "https://paradigmrealty.co.in/",
-    "peakalpha": "https://www.peakalpha.com",
-    "pearl": "https://www.pearl.com/careers",
-    "perficient": "http://www.perficient.com",
-    "persistent": "https://www.persistent.com/",
-    "persistent systems": "https://www.persistent.com/",
-    "photon": "http://www.photon.in/",
-    "principal financial group": "https://www.principal.com/",
-    "prodapt solutions": "https://www.prodapt.com/",
-    "protiviti india": "https://www.protiviti.com/IN-en",
-    "pwc": "https://www.pwc.com/",
-    "pwc service delivery center": "https://www.pwc.com/",
-    "qentelli": "http://www.qentelli.com",
-    "qualcomm": "https://www.qualcomm.com/",
-    "qualitykiosk technologies": "https://www.qualitykiosk.com/",
-    "quest global": "https://www.quest-global.com/",
-    "quick heal technologies": "https://www.quickheal.co.in/",
-    "reliance": "https://www.ril.com/",
-    "reliance industries": "https://www.ril.com/",
-    "reliance jio": "https://www.jio.com/",
-    "rf managed services": "https://www.realfoundations.in",
-    "rg group (real estate, sec-67, noida)": "http://www.rgluxury.co.in",
-    "ridik": "https://xtreemsolution.com/",
-    "rigved technologies": "http://www.rigvedtech.com/",
-    "rock solid solutions": "http://www.rocksolid.in/",
-    "royaloak incorporation": "https://www.royaloakindia.com/",
-    "sagility india": "https://sagility.com/",
-    "salesforce": "https://www.salesforce.com/",
-    "sap": "https://www.sap.com/",
-    "sapiens": "https://www.sapiens.com",
-    "siemens": "https://www.siemens.com/in/en.html",
-    "sightspectrum": "http://www.sightspectrum.com",
-    "simple energy": "https://www.simpleenergy.in/",
-    "smart ims": "http://www.SmartIMS.com",
-    "south asian foods corporation": "https://mrgolisoda.com/",
-    "spekond": "https://www.spekond.com/",
-    "srm technologies": "https://www.srmtech.com",
-    "state street": "https://www.statestreet.com/home.html",
-    "sutherland": "https://www.sutherlandglobal.com/",
-    "svn systech india": "http://svnindia.com/",
-    "synechron": "https://www.synechron.com/",
-    "synergy computer solutions": "https://www.synergycom.com",
-    "t-systems ict india pvt ltd": "https://www.t-systems.com/in/en",
-    "taazaa tech": "https://www.taazaa.com/",
-    "tanisha systems": "http://www.tanishasystems.com",
-    "tanla platforms": "https://www.tanla.com/",
-    "tata communications": "https://www.tatacommunications.com/",
-    "tata consultancy services": "https://www.tcs.com/",
-    "tata elxsi": "https://www.tataelxsi.com/",
-    "tavant": "https://www.tavant.com/",
-    "tcs": "https://www.tcs.com/",
-    "tech mahindra": "https://www.techmahindra.com/",
-    "tech smcsquared gcc": "https://www.smc2.com/",
-    "techathalon software": "http://www.techathalon.com/",
-    "technoidentity": "https://technoidentity.com/",
-    "techstar group": "https://techstargroup.com/",
-    "teksystems": "https://www.teksystems.com",
-    "tekwissen": "https://www.tekwissen.com/",
-    "teliolabs communication": "https://www.teliolabs.com/",
-    "tenarai technologies private limited": "https://www.tenarai.com/",
-    "thoucentric": "https://wwww.thoucentric.com",
-    "tracxn": "https://tracxn.com/",
-    "tranzeal": "https://www.tranzeal.com",
-    "tronicszone": "https://www.tronicszone.com",
-    "truminds": "http://www.truminds.com/",
-    "unify technologies": "https://unifytech.com/",
-    "valgenesis": "https://www.valgenesis.com/",
-    "valuelabs": "https://www.valuelabs.com",
-    "valuenable": "https://valuenable.in/",
-    "vconstruct": "http://www.vconstruct.com",
-    "vertisystem": "https://vertisystem.com/",
-    "vijay sales": "https://www.vijaysales.com",
-    "virtusa": "https://www.virtusa.com/",
-    "visteon": "https://www.visteon.com/",
-    "voya india": "https://www.voyaindia.com/",
-    "vtechfamily solution india": "https://www.vtechsoln.in/",
-    "webol": "https://webol.co.uk/",
-    "wipro": "https://www.wipro.com/",
-    "xoriant": "https://www.xoriant.com/",
-    "yash technologies": "https://www.yash.com/",
-    "zelis healthcare": "https://www.zelis.com/",
-    "zensar": "https://www.zensar.com/",
-    "zensar technologies": "https://www.zensar.com/",
-}
 
 
 def clean_html(text: Optional[str]) -> str:
@@ -311,17 +42,60 @@ def clean_html(text: Optional[str]) -> str:
     return re.sub(r"\s+", " ", t).strip()
 
 
+async def dynamic_extract_ambitionbox(page: Page, url: str) -> tuple[str, bool]:
+    """Pure dynamic extraction from AmbitionBox page.
+    
+    Returns:
+        (website_url, is_page_detected_and_valid)
+    """
+    website = ""
+    page_loaded = False
+    try:
+        resp = await page.goto(url, wait_until="domcontentloaded", timeout=15000)
+        if resp and resp.status == 404:
+            return ("", True)  # Confirmed page doesn't exist
+
+        for _ in range(25):
+            html_text = await page.content()
+            if "__NEXT_DATA__" in html_text or '"website"' in html_text:
+                page_loaded = True
+                m = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', html_text)
+                if m:
+                    try:
+                        d = json.loads(m.group(1))
+                        props = d.get("props", {}).get("pageProps", {}) or {}
+                        meta = props.get("companyMetaInformation", {}) or {}
+                        header = props.get("companyHeaderData", {}) or {}
+                        website = (meta.get("website") or header.get("website") or "").strip()
+                    except Exception:
+                        pass
+
+                if not website:
+                    web_m = re.search(r'"website"\s*:\s*"(https?://[^"]+)"', html_text)
+                    if web_m:
+                        website = web_m.group(1).replace("\\/", "").strip()
+
+                if website:
+                    break
+            await asyncio.sleep(0.1)
+
+    except Exception:
+        return ("", False)
+
+    return (website, page_loaded)
+
+
 async def enrich_company_websites_in_browser(
     jobs: List[Dict[str, Any]],
     context: BrowserContext,
-    num_tabs: int = 2,
-    max_enrichment_seconds: float = 90.0,
+    num_tabs: int = 3,
+    max_enrichment_seconds: float = 180.0,
 ) -> None:
-    """Enrich jobs with official company websites:
-    1. Instant lookup for known enterprise employers (0ms).
-    2. Cached lookup for previous hits.
-    3. Paced multi-tab live extraction for remaining companies.
-    4. Guaranteed no-hang with hard timeouts and graceful cleanup.
+    """Pure dynamic live enrichment for all company websites directly from AmbitionBox:
+    - 0% hardcoding: All websites are retrieved live directly from AmbitionBox.
+    - Accurate detection of listed websites vs companies without website entries.
+    - Multi-tab queue processing for speed.
+    - Guaranteed no-hang with hard timeouts and graceful cleanup.
     """
     url_to_comp: Dict[str, str] = {}
     for j in jobs:
@@ -335,29 +109,20 @@ async def enrich_company_websites_in_browser(
     if total == 0:
         return
 
-    print(f"\n[*] Enriching {total} unique company websites...", flush=True)
-    logger.info("Enriching %d unique company websites...", total)
+    print(f"\n[*] Pure dynamic live enrichment for {total} unique companies from AmbitionBox...", flush=True)
+    logger.info("Enriching %d unique company websites dynamically...", total)
 
     completed = 0
     url_to_website: Dict[str, str] = {}
     remaining_to_fetch: List[tuple[str, str]] = []
 
-    # 1. Fast resolve known domains and cached items
+    # Check runtime cache first for previously queried URLs in this session
     for ab_url, comp_name in unique_items:
-        norm_name = comp_name.lower().strip()
         if ab_url in _COMPANY_WEBSITE_CACHE:
             url_to_website[ab_url] = _COMPANY_WEBSITE_CACHE[ab_url]
             completed += 1
-        elif norm_name in KNOWN_COMPANY_DOMAINS:
-            site = KNOWN_COMPANY_DOMAINS[norm_name]
-            _COMPANY_WEBSITE_CACHE[ab_url] = site
-            url_to_website[ab_url] = site
-            completed += 1
-            print(f"[{completed}/{total}] {comp_name} -> {site} (Known Registry)", flush=True)
         else:
             remaining_to_fetch.append((ab_url, comp_name))
-
-    print(f"[+] Instantly resolved {completed}/{total} companies. Fetching remaining {len(remaining_to_fetch)} via live browser tabs...", flush=True)
 
     if not remaining_to_fetch:
         for job in jobs:
@@ -370,10 +135,8 @@ async def enrich_company_websites_in_browser(
     for item in remaining_to_fetch:
         await queue.put(item)
 
-    consecutive_blocks = 0
-
     async def worker_tab(tab_id: int) -> None:
-        nonlocal completed, consecutive_blocks
+        nonlocal completed
         page: Optional[Page] = None
         try:
             page = await context.new_page()
@@ -395,58 +158,21 @@ async def enrich_company_websites_in_browser(
                 except asyncio.QueueEmpty:
                     break
 
-                # If Cloudflare anti-bot blocks multiple consecutive times, break early without hanging
-                if consecutive_blocks >= 12:
-                    _COMPANY_WEBSITE_CACHE[ab_url] = ""
-                    url_to_website[ab_url] = ""
-                    completed += 1
-                    print(f"[{completed}/{total}] {comp_name} -> [Rate Limited]", flush=True)
-                    queue.task_done()
-                    continue
-
-                website = ""
-                try:
-                    await page.goto(ab_url, wait_until="domcontentloaded", timeout=12000)
-                    for _ in range(25):
-                        html_text = await page.content()
-                        if "__NEXT_DATA__" in html_text or '"website"' in html_text:
-                            m = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', html_text)
-                            if m:
-                                try:
-                                    d = json.loads(m.group(1))
-                                    props = d.get("props", {}).get("pageProps", {})
-                                    meta = props.get("companyMetaInformation", {})
-                                    header = props.get("companyHeaderData", {})
-                                    website = (meta.get("website") or header.get("website") or "").strip()
-                                except Exception:
-                                    pass
-
-                            if not website:
-                                web_m = re.search(r'"website"\s*:\s*"(https?://[^"]+)"', html_text)
-                                if web_m:
-                                    website = web_m.group(1).replace("\\/", "").strip()
-
-                            if website:
-                                break
-                        await asyncio.sleep(0.1)
-
-                except Exception:
-                    pass
-
-                if website:
-                    consecutive_blocks = 0
-                else:
-                    consecutive_blocks += 1
-
+                website, is_detected = await dynamic_extract_ambitionbox(page, ab_url)
                 _COMPANY_WEBSITE_CACHE[ab_url] = website
                 url_to_website[ab_url] = website
                 completed += 1
 
-                display_web = website if website else "[Not listed]"
-                print(f"[{completed}/{total}] {comp_name} -> {display_web}", flush=True)
+                if website:
+                    status_str = website
+                elif is_detected:
+                    status_str = "[Not listed on AmbitionBox]"
+                else:
+                    status_str = "[Page unreachable / no website]"
+
+                print(f"[{completed}/{total}] {comp_name} -> {status_str}", flush=True)
                 queue.task_done()
-                # Pacing between calls to avoid triggering Cloudflare rate limits
-                await asyncio.sleep(0.15)
+                await asyncio.sleep(0.08)
 
         except Exception:
             pass
@@ -477,7 +203,7 @@ async def enrich_company_websites_in_browser(
             if web:
                 found_count += 1
 
-    print(f"[+] Finished company website enrichment ({found_count}/{total} resolved).\n", flush=True)
+    print(f"[+] Finished company website enrichment ({found_count}/{total} websites resolved).\n", flush=True)
 
 
 class NaukriBrowserScraper:
@@ -785,8 +511,8 @@ class NaukriBrowserScraper:
                 if len(all_jobs) >= max_jobs:
                     break
 
-            # Enrich company websites inside the active browser context with live terminal logging
-            await enrich_company_websites_in_browser(all_jobs, context, num_tabs=2, max_enrichment_seconds=90.0)
+            # Pure dynamic website enrichment inside active context
+            await enrich_company_websites_in_browser(all_jobs, context, num_tabs=3, max_enrichment_seconds=180.0)
 
             try:
                 await asyncio.wait_for(browser.close(), timeout=5.0)
