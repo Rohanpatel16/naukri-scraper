@@ -41,14 +41,14 @@ jobs:
           pip install -r requirements.txt
           python -m playwright install --with-deps chromium
 
-      - name: Run Wellfound Scraper
+      - name: Run Wellfound Scraper (Dump & Filter)
         run: |
           URL="${{ github.event.inputs.url }}"
           PAGES="${{ github.event.inputs.pages }}"
           DAYS="${{ github.event.inputs.days }}"
           HOURS="${{ github.event.inputs.hours }}"
 
-          CMD="python -m naukri_scraper.wellfound_cli --url \"$URL\" --output wellfound_companies.csv"
+          CMD="python -m naukri_scraper.wellfound_cli --url \"$URL\" --output wellfound_companies.csv --raw-dump raw_wellfound_dump.json"
           if [ -n "$PAGES" ]; then
             CMD="$CMD --pages $PAGES"
           fi
@@ -62,10 +62,18 @@ jobs:
           echo "Running: $CMD"
           eval $CMD
 
-      - name: Upload Wellfound Companies CSV
+      - name: Upload Filtered Companies CSV
         uses: actions/upload-artifact@v4
         if: always()
         with:
           name: wellfound-companies-csv
           path: wellfound_companies.csv
+          retention-days: 30
+
+      - name: Upload Raw Job Dump JSON
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: raw-wellfound-dump-json
+          path: raw_wellfound_dump.json
           retention-days: 30

@@ -1,4 +1,4 @@
-"""CLI for the Wellfound job scraper — paste any Wellfound URL and get a company CSV."""
+"""CLI for the Wellfound job scraper — Dump & Filter architecture."""
 
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ def print_banner() -> None:
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Scrape Wellfound.com for unique company data. Paste any Wellfound URL."
+        description="Scrape Wellfound.com for unique company data using Dump & Filter method."
     )
     parser.add_argument(
         "-u", "--url",
@@ -54,18 +54,23 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         "-D", "--days",
         type=int,
         default=None,
-        help="Only include jobs posted within the last N days (e.g. -D 3, -D 7, -D 14)",
+        help="Filter jobs posted within the last N days (e.g. -D 3, -D 7, -D 14)",
     )
     parser.add_argument(
         "-H", "--hours",
         type=int,
         default=None,
-        help="Only include jobs posted within the last N hours (e.g. -H 24, -H 48)",
+        help="Filter jobs posted within the last N hours (e.g. -H 24, -H 48)",
     )
     parser.add_argument(
         "-o", "--output",
         default="wellfound_companies.csv",
-        help="Output CSV file (default: wellfound_companies.csv)",
+        help="Filtered companies CSV output (default: wellfound_companies.csv)",
+    )
+    parser.add_argument(
+        "--raw-dump",
+        default="raw_wellfound_dump.json",
+        help="Path to save complete unfiltered raw job dump (default: raw_wellfound_dump.json)",
     )
     parser.add_argument(
         "-w", "--workers",
@@ -123,7 +128,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     elif args.days:
         time_filter_str = f"Last {args.days} Days"
     print(f"[*] Time Filter : {time_filter_str}")
-    print(f"[*] Output File : {args.output}")
+    print(f"[*] Raw Dump    : {args.raw_dump}")
+    print(f"[*] Output CSV  : {args.output}")
     print("-" * 60)
 
     from .wellfound_scraper import WellfoundScraper
@@ -135,6 +141,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         max_pages=args.pages,
         days=args.days,
         hours=args.hours,
+        raw_dump_path=args.raw_dump,
     )
     elapsed = time.time() - start
 
@@ -153,7 +160,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(f"[+] Unique Companies  : {len(companies):,}")
     print(f"[+] Total Job Postings: {total_jobs:,}")
     print(f"[+] Website Coverage  : {resolved_websites}/{len(companies)} ({pct:.0f}%)")
-    print(f"[+] Saved to          : {out_path.resolve()}")
+    print(f"[+] Raw Dump Saved to : {Path(args.raw_dump).resolve()}")
+    print(f"[+] CSV Saved to      : {out_path.resolve()}")
     print("=" * 60)
 
     # Preview top companies

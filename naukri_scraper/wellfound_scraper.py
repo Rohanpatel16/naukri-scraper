@@ -1,11 +1,13 @@
-"""Wellfound.com job scraper — extracts unique companies with websites, LinkedIn URLs, and open jobs."""
+"""Wellfound.com job scraper — Dump & Filter architecture with dynamic website + LinkedIn enrichment."""
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 import urllib.parse
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import httpx
@@ -22,7 +24,7 @@ DEFAULT_HEADERS = {
     )
 }
 
-WELLFOUND_FIELDS = [
+WELLFOUND_COMPANY_FIELDS = [
     "company_name",
     "company_website",
     "company_linkedin_url",
@@ -37,12 +39,17 @@ WELLFOUND_FIELDS = [
     "employee_count",
 ]
 
+# Comprehensive filter list: ignore directories, social platforms, and aggregator sites
 EXCLUDE_DDGS_DOMAINS = [
     "linkedin.com", "facebook.com", "twitter.com", "x.com", "instagram.com", "youtube.com",
     "glassdoor", "ambitionbox", "naukri", "indeed", "zaubacorp", "tofler", "crunchbase",
     "zoominfo", "owler", "wikipedia.org", "justdial.com", "indiamart.com", "tradeindia.com",
     "tracxn.com", "companydetails.in", "bing.com", "google.com", "github.com", "play.google.com",
-    "wellfound.com", "angel.co"
+    "wellfound.com", "angel.co", "yourstory.com", "remoterocketship.com", "scribd.com",
+    "unstop.com", "leadiq.com", "rocketreach.co", "signalhire.com", "dealroom.co",
+    "preqin.com", "cbinsights.com", "g2.com", "volza.com", "datanyze.com", "apollo.io",
+    "craft.co", "pitchbook.com", "instahyre.com", "cutshort.io", "shine.com", "hirist.com",
+    "internshala.com", "foundit.in", "timesjobs.com", "theorg.com", "ycombinator.com"
 ]
 
 
@@ -105,9 +112,10 @@ def search_wellfound_company_details_sync(company_name: str) -> Tuple[str, str, 
     website = ""
     linkedin = ""
 
+    # Query 1: Search for official website + linkedin
     try:
         with DDGS(timeout=4) as ddgs:
-            results = list(ddgs.text(f"{target_name} official website linkedin", max_results=6))
+            results = list(ddgs.text(f"{target_name} official website linkedin", max_results=8))
             for r in results:
                 url = r.get("href", "")
                 if not url:
@@ -125,6 +133,17 @@ def search_wellfound_company_details_sync(company_name: str) -> Tuple[str, str, 
 
                 if website and linkedin:
                     break
+
+            # Query 2 (if LinkedIn still missing): Search targeted LinkedIn query
+            if not linkedin:
+                li_results = list(ddgs.text(f'"{target_name}" site:linkedin.com/company', max_results=3))
+                for r in li_results:
+                    url = r.get("href", "")
+                    if "linkedin.com/company" in url.lower():
+                        m = re.search(r"https?://(?:[a-z]{2,3}\.)?linkedin\.com/company/[a-zA-Z0-9_\-]+", url)
+                        if m:
+                            linkedin = m.group(0)
+                            break
     except Exception:
         pass
 
@@ -163,7 +182,6 @@ def _extract_page_count(html: str) -> int:
     if m:
         return int(m.group(1))
 
-    # Check total results count
     m2 = re.search(r"([\d,]+)\s+results?\s+total", text, re.I)
     if m2:
         total = int(m2.group(1).replace(",", ""))
@@ -171,14 +189,10 @@ def _extract_page_count(html: str) -> int:
     return 1
 
 
-def _parse_listing_page(
-    html: str,
-    base_url: str,
-    max_days: Optional[float] = None,
-) -> List[Dict[str, Any]]:
-    """Parse a Wellfound listing page and extract company + job data with time filtering."""
+def _extract_raw_jobs_from_html(html: str, base_url: str, page_number: int = 1) -> List[Dict[str, Any]]:
+    """Extracts 100% of raw structured data from listing HTML (Dump Phase)."""
     soup = BeautifulSoup(html, "html.parser")
-    companies: List[Dict[str, Any]] = []
+    raw_jobs: List[Dict[str, Any]] = []
 
     company_links = soup.find_all("a", href=re.compile(r"^/company/[^/]+$"))
     seen_slugs = set()
@@ -190,22 +204,6 @@ def _parse_listing_page(
             continue
         seen_slugs.add(slug)
 
-        comp: Dict[str, Any] = {
-            "company_name": cname,
-            "company_website": "",
-            "company_linkedin_url": "",
-            "total_jobs_posted": 0,
-            "job_titles": [],
-            "posted_dates": [],
-            "wellfound_job_urls": [],
-            "locations": set(),
-            "salaries": set(),
-            "equity": set(),
-            "stage": "",
-            "employee_count": "",
-        }
-
-        # Walk up to find enclosing card container
         card = a
         found_card = None
         for _ in range(7):
@@ -225,18 +223,19 @@ def _parse_listing_page(
         if not found_card:
             found_card = card
 
+        emp_count = ""
+        stage = ""
+        tagline = ""
+
         if found_card:
-            # Employee count
             emp_el = found_card.find(string=re.compile(r"\d+[\d,]*\s*[–-]\s*\d+\s*Employees?|\d+\s*Employees?", re.I))
             if emp_el:
-                comp["employee_count"] = emp_el.strip()
+                emp_count = emp_el.strip()
 
-            # Stage tags
-            stage_tags = found_card.find_all(["span", "a", "div"], string=re.compile(r"Stage|Series|Seed|Growth|Late", re.I))
+            stage_tags = found_card.find_all(["span", "a", "div"], string=re.compile(r"Stage|Series|Seed|Growth|Late|Public", re.I))
             if stage_tags:
-                comp["stage"] = stage_tags[0].get_text(strip=True)
+                stage = stage_tags[0].get_text(strip=True)
 
-            # Job titles & URLs with date parsing
             job_links = found_card.find_all("a", href=re.compile(r"^/jobs/\d+"))
             for jlink in job_links:
                 title = jlink.get_text(strip=True)
@@ -244,11 +243,12 @@ def _parse_listing_page(
                 if not title or not href:
                     continue
 
-                # Find posted date around the job link
+                job_id_m = re.search(r"/jobs/(\d+)", href)
+                job_id = job_id_m.group(1) if job_id_m else ""
+
                 parent = jlink.find_parent()
                 ptext = parent.get_text(" | ", strip=True) if parent else ""
-                
-                # Check up 2 levels for the date element
+
                 date_str = ""
                 curr = parent
                 for _ in range(3):
@@ -260,41 +260,110 @@ def _parse_listing_page(
                         break
                     curr = curr.parent
 
-                # Check max_days filter
-                if max_days is not None and date_str:
-                    age = parse_posted_age_days(date_str)
-                    if age > max_days:
-                        continue  # Skip jobs older than max_days
+                sal_m = re.search(r"\$[\d,]+k?\s*[-–]\s*\$[\d,]+k?", ptext, re.I)
+                salary = sal_m.group(0) if sal_m else ""
 
-                if title not in comp["job_titles"]:
-                    comp["job_titles"].append(title)
-                    comp["posted_dates"].append(date_str or "Recent")
+                eq_m = re.search(r"[\d.]+%\s*[-–]\s*[\d.]+%", ptext)
+                equity = eq_m.group(0) if eq_m else ""
 
-                full_url = f"https://wellfound.com{href}" if href.startswith("/") else href
-                if full_url not in comp["wellfound_job_urls"]:
-                    comp["wellfound_job_urls"].append(full_url)
+                loc_m = re.search(r"(?:In office|Remote|Hybrid)\s*[•·]\s*([^•·$\n|]+)", ptext)
+                location = loc_m.group(1).strip() if loc_m else ""
 
-                if parent:
-                    ptext_plain = parent.get_text(" ", strip=True)
-                    sal_m = re.search(r"\$[\d,]+k?\s*[-–]\s*\$[\d,]+k?", ptext_plain, re.I)
-                    if sal_m:
-                        comp["salaries"].add(sal_m.group(0))
-                    eq_m = re.search(r"[\d.]+%\s*[-–]\s*[\d.]+%", ptext_plain)
-                    if eq_m:
-                        comp["equity"].add(eq_m.group(0))
-                    loc_m = re.search(r"(?:In office|Remote|Hybrid)\s*[•·]\s*([^•·$\n]+)", ptext_plain)
-                    if loc_m:
-                        comp["locations"].add(loc_m.group(1).strip())
+                type_m = re.search(r"(Full-time|Part-time|Contract|Internship|Intern)", ptext, re.I)
+                job_type = type_m.group(1) if type_m else ""
 
-        comp["total_jobs_posted"] = len(comp["job_titles"])
-        if comp["total_jobs_posted"] > 0:
-            companies.append(comp)
+                raw_jobs.append({
+                    "page_number": page_number,
+                    "company_name": cname,
+                    "company_slug": slug,
+                    "stage": stage,
+                    "employee_count": emp_count,
+                    "job_id": job_id,
+                    "job_title": title,
+                    "job_url": f"https://wellfound.com{href}" if href.startswith("/") else href,
+                    "job_type": job_type,
+                    "salary": salary,
+                    "equity": equity,
+                    "location": location,
+                    "posted_date_raw": date_str,
+                    "posted_age_days": parse_posted_age_days(date_str),
+                })
 
-    return companies
+    return raw_jobs
+
+
+def filter_and_aggregate_companies(
+    raw_jobs: List[Dict[str, Any]],
+    max_days: Optional[float] = None,
+    location_filter: Optional[str] = None,
+    keyword_filter: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Applies filters to the raw job dump and aggregates by unique company (Filter Phase)."""
+    agg: Dict[str, Dict[str, Any]] = {}
+
+    for j in raw_jobs:
+        # Time filter
+        if max_days is not None and j.get("posted_date_raw"):
+            if j.get("posted_age_days", 999.0) > max_days:
+                continue
+
+        # Location filter
+        if location_filter and location_filter.lower() not in (j.get("location") or "").lower():
+            continue
+
+        # Keyword filter
+        if keyword_filter and keyword_filter.lower() not in (j.get("job_title") or "").lower():
+            continue
+
+        cname = j["company_name"]
+        if not cname:
+            continue
+
+        if cname not in agg:
+            agg[cname] = {
+                "company_name": cname,
+                "company_slug": j.get("company_slug", ""),
+                "company_website": "",
+                "company_linkedin_url": "",
+                "total_jobs_posted": 0,
+                "job_titles": [],
+                "posted_dates": [],
+                "wellfound_job_urls": [],
+                "locations": set(),
+                "salaries": set(),
+                "equity": set(),
+                "stage": j.get("stage", ""),
+                "employee_count": j.get("employee_count", ""),
+            }
+
+        rec = agg[cname]
+        rec["total_jobs_posted"] += 1
+        
+        t = j.get("job_title", "")
+        if t and t not in rec["job_titles"]:
+            rec["job_titles"].append(t)
+            rec["posted_dates"].append(j.get("posted_date_raw") or "Recent")
+
+        u = j.get("job_url", "")
+        if u and u not in rec["wellfound_job_urls"]:
+            rec["wellfound_job_urls"].append(u)
+
+        if j.get("location"):
+            rec["locations"].add(j["location"])
+        if j.get("salary"):
+            rec["salaries"].add(j["salary"])
+        if j.get("equity"):
+            rec["equity"].add(j["equity"])
+        if not rec["stage"] and j.get("stage"):
+            rec["stage"] = j["stage"]
+        if not rec["employee_count"] and j.get("employee_count"):
+            rec["employee_count"] = j["employee_count"]
+
+    return list(agg.values())
 
 
 class WellfoundScraper:
-    """Playwright-based scraper for Wellfound.com."""
+    """Playwright-based scraper for Wellfound.com using Dump & Filter method."""
 
     def __init__(self, headless: bool = True, num_workers: int = 3):
         self.headless = headless
@@ -316,8 +385,9 @@ class WellfoundScraper:
         max_pages: Optional[int] = None,
         days: Optional[int] = None,
         hours: Optional[int] = None,
+        raw_dump_path: Optional[str] = "raw_wellfound_dump.json",
     ) -> List[Dict[str, Any]]:
-        """Main async scraper coordinator with optional time filtering."""
+        """Main async Dump & Filter coordinator."""
         max_days_filter: Optional[float] = None
         if hours is not None and hours > 0:
             max_days_filter = hours / 24.0
@@ -394,7 +464,7 @@ class WellfoundScraper:
 
             print(f"[*] Wellfound: {total_results} total results across {total_pages} pages (scraping {target_pages} pages)...\n", flush=True)
 
-            # Collect pages
+            # Collect raw HTML across parallel workers
             all_pages_html: Dict[int, str] = {1: html1}
 
             if target_pages > 1:
@@ -426,45 +496,43 @@ class WellfoundScraper:
             await context.close()
             await browser.close()
 
-        # Parse all raw companies with freshness filter
-        raw_companies: List[Dict[str, Any]] = []
+        # ==========================================
+        # PHASE 1: DUMP ALL RAW DATA
+        # ==========================================
+        all_raw_jobs: List[Dict[str, Any]] = []
         for pnum in sorted(all_pages_html.keys()):
             html = all_pages_html[pnum]
             if html:
-                page_comps = _parse_listing_page(html, page1_url, max_days=max_days_filter)
-                raw_companies.extend(page_comps)
+                p_jobs = _extract_raw_jobs_from_html(html, page1_url, page_number=pnum)
+                all_raw_jobs.extend(p_jobs)
 
-        # Aggregate unique companies
-        agg: Dict[str, Dict[str, Any]] = {}
-        for comp in raw_companies:
-            cname = comp["company_name"]
-            if not cname:
-                continue
-            if cname not in agg:
-                agg[cname] = comp
-                agg[cname]["locations"] = set(comp["locations"])
-                agg[cname]["salaries"] = set(comp["salaries"])
-                agg[cname]["equity"] = set(comp["equity"])
-            else:
-                existing = agg[cname]
-                existing["total_jobs_posted"] += comp["total_jobs_posted"]
-                for i, t in enumerate(comp["job_titles"]):
-                    if t not in existing["job_titles"]:
-                        existing["job_titles"].append(t)
-                        if i < len(comp["posted_dates"]):
-                            existing["posted_dates"].append(comp["posted_dates"][i])
-                for u in comp["wellfound_job_urls"]:
-                    if u not in existing["wellfound_job_urls"]:
-                        existing["wellfound_job_urls"].append(u)
-                existing["locations"].update(comp["locations"])
-                existing["salaries"].update(comp["salaries"])
-                existing["equity"].update(comp["equity"])
-                if not existing["stage"] and comp["stage"]:
-                    existing["stage"] = comp["stage"]
-                if not existing["employee_count"] and comp["employee_count"]:
-                    existing["employee_count"] = comp["employee_count"]
+        print(f"\n[+] Raw Data Collection: Extracted {len(all_raw_jobs):,} total raw job records.", flush=True)
+        if raw_dump_path:
+            try:
+                out_raw = Path(raw_dump_path)
+                with out_raw.open("w", encoding="utf-8") as f:
+                    json.dump(all_raw_jobs, f, indent=2)
+                print(f"[+] Saved complete raw dump to: {out_raw.resolve()}", flush=True)
+            except Exception as e:
+                logger.warning("Could not save raw dump: %s", e)
 
-        unique_companies_list = list(agg.values())
+        # ==========================================
+        # PHASE 2: FILTER & AGGREGATE
+        # ==========================================
+        unique_companies_list = filter_and_aggregate_companies(
+            raw_jobs=all_raw_jobs,
+            max_days=max_days_filter,
+        )
+
+        time_desc = f"last {hours} hours" if hours else (f"last {days} days" if days else "all time")
+        print(f"\n[*] Filter Phase ({time_desc}): Kept {len(unique_companies_list):,} unique companies matching criteria.", flush=True)
+
+        if not unique_companies_list:
+            return []
+
+        # ==========================================
+        # PHASE 3: DYNAMIC LIVE ENRICHMENT
+        # ==========================================
         print(f"\n[*] Pure dynamic live enrichment (DuckDuckGo + LinkedIn + Clearbit)...", flush=True)
         print(f"[INFO] Enriching {len(unique_companies_list)} unique companies with Websites and LinkedIn URLs...", flush=True)
 
@@ -519,10 +587,11 @@ class WellfoundScraper:
         max_pages: Optional[int] = None,
         days: Optional[int] = None,
         hours: Optional[int] = None,
+        raw_dump_path: Optional[str] = "raw_wellfound_dump.json",
     ) -> List[Dict[str, Any]]:
         """Public synchronous entry point."""
         try:
-            return asyncio.run(self._async_scrape(search_url, max_pages, days, hours))
+            return asyncio.run(self._async_scrape(search_url, max_pages, days, hours, raw_dump_path))
         except RuntimeError:
             loop = asyncio.get_event_loop()
-            return loop.run_until_complete(self._async_scrape(search_url, max_pages, days, hours))
+            return loop.run_until_complete(self._async_scrape(search_url, max_pages, days, hours, raw_dump_path))
