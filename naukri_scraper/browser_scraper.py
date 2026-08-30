@@ -79,15 +79,11 @@ EXCLUDE_DDGS_DOMAINS = [
 
 
 def search_company_details_ddgs_sync(company_name: str) -> Tuple[str, str]:
-    """Sync helper for DuckDuckGo Search extracting (website, linkedin_url)."""
+    """Sync helper for DuckDuckGo Search extracting (website, linkedin_url) rapidly."""
     website = ""
     linkedin_url = ""
 
-    queries = [
-        f"{company_name} official website",
-        f"{company_name} linkedin company"
-    ]
-
+    # Clean name
     clean = re.sub(r"\(.*?\)", "", company_name)
     clean = re.sub(
         r"\b(pvt\.?|private|ltd\.?|limited|llc|inc\.?|corp\.?|corporation|group|services|enterprises|technologies|solutions)\b",
@@ -96,8 +92,11 @@ def search_company_details_ddgs_sync(company_name: str) -> Tuple[str, str]:
         flags=re.IGNORECASE,
     ).strip()
     clean = re.sub(r"\s+", " ", clean).strip()
-    if clean and clean.lower() != company_name.lower() and len(clean) > 2:
-        queries.append(f"{clean} official website")
+    target_name = clean if clean and len(clean) > 2 else company_name
+
+    queries = [
+        f"{target_name} official website linkedin"
+    ]
 
     try:
         try:
@@ -111,7 +110,7 @@ def search_company_details_ddgs_sync(company_name: str) -> Tuple[str, str]:
         if website and linkedin_url:
             break
         try:
-            with DDGS(timeout=8) as ddgs:
+            with DDGS(timeout=3) as ddgs:
                 results = list(ddgs.text(q, max_results=5))
                 for r in results:
                     url = r.get("href", "")
@@ -235,8 +234,8 @@ async def dynamic_extract_ambitionbox(page: Page, url: str) -> tuple[str, str, b
 async def enrich_company_websites_in_browser(
     jobs: List[Dict[str, Any]],
     context: BrowserContext,
-    num_tabs: int = 3,
-    max_enrichment_seconds: float = 180.0,
+    num_tabs: int = 6,
+    max_enrichment_seconds: float = 120.0,
 ) -> None:
     """Pure dynamic live enrichment with three-tier strategy:
     1. Primary (Tier 1): AmbitionBox live extraction via concurrent browser tabs.
@@ -332,7 +331,7 @@ async def enrich_company_websites_in_browser(
 
                     print(f"[{completed}/{total_ab}] {comp_name} -> {status_str}", flush=True)
                     queue.task_done()
-                    await asyncio.sleep(0.08)
+                    await asyncio.sleep(0.05)
 
             except Exception:
                 pass
@@ -357,25 +356,32 @@ async def enrich_company_websites_in_browser(
     unresolved_companies = [c for c in all_company_names if not comp_to_website.get(c) or not comp_to_linkedin.get(c)]
     if unresolved_companies:
         print(f"\n[*] Querying DuckDuckGo Search (Tier 2 fallback) for {len(unresolved_companies)} companies...", flush=True)
-        ddgs_semaphore = asyncio.Semaphore(6)
-        tasks = [dynamic_extract_ddgs(c, ddgs_semaphore) for c in unresolved_companies]
-        for coro in asyncio.as_completed(tasks):
-            cname, ddgs_web, ddgs_li = await coro
-            if ddgs_web and not comp_to_website.get(cname):
-                comp_to_website[cname] = ddgs_web
-                print(f"  [+] DuckDuckGo Website Found: {cname} -> {ddgs_web}", flush=True)
-            if ddgs_li and not comp_to_linkedin.get(cname):
-                comp_to_linkedin[cname] = ddgs_li
-                print(f"  [+] DuckDuckGo LinkedIn Found: {cname} -> {ddgs_li}", flush=True)
+        ddgs_semaphore = asyncio.Semaphore(8)
+
+        async def run_ddgs_pool():
+            tasks = [dynamic_extract_ddgs(c, ddgs_semaphore) for c in unresolved_companies]
+            for coro in asyncio.as_completed(tasks):
+                cname, ddgs_web, ddgs_li = await coro
+                if ddgs_web and not comp_to_website.get(cname):
+                    comp_to_website[cname] = ddgs_web
+                    print(f"  [+] DuckDuckGo Website Found: {cname} -> {ddgs_web}", flush=True)
+                if ddgs_li and not comp_to_linkedin.get(cname):
+                    comp_to_linkedin[cname] = ddgs_li
+                    print(f"  [+] DuckDuckGo LinkedIn Found: {cname} -> {ddgs_li}", flush=True)
+
+        try:
+            await asyncio.wait_for(run_ddgs_pool(), timeout=45.0)
+        except asyncio.TimeoutError:
+            print("[!] Reached DuckDuckGo time limit (45s); proceeding to Clearbit fallback...", flush=True)
 
     # --- Phase 3 (Tier 3): Clearbit Autocomplete API Fallback ---
     still_unresolved = [c for c in all_company_names if not comp_to_website.get(c)]
     if still_unresolved:
         print(f"\n[*] Querying Clearbit Autocomplete API (Tier 3 fallback) for {len(still_unresolved)} companies...", flush=True)
-        cb_semaphore = asyncio.Semaphore(10)
+        cb_semaphore = asyncio.Semaphore(15)
         try:
             import httpx
-            limits = httpx.Limits(max_keepalive_connections=15, max_connections=20)
+            limits = httpx.Limits(max_keepalive_connections=20, max_connections=30)
             async with httpx.AsyncClient(limits=limits, follow_redirects=True) as http_client:
                 tasks = [dynamic_extract_clearbit(http_client, c, cb_semaphore) for c in still_unresolved]
                 for coro in asyncio.as_completed(tasks):
@@ -723,7 +729,7 @@ class NaukriBrowserScraper:
                     break
 
             # Pure dynamic website enrichment inside active context
-            await enrich_company_websites_in_browser(all_jobs, context, num_tabs=3, max_enrichment_seconds=180.0)
+            await enrich_company_websites_in_browser(all_jobs, context, num_tabs=6, max_enrichment_seconds=120.0)
 
             try:
                 await asyncio.wait_for(context.close(), timeout=4.0)
