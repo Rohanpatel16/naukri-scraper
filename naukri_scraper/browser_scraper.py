@@ -449,7 +449,7 @@ class NaukriBrowserScraper:
                 try:
                     payload = await response.json()
                     total_count = payload.get("noOfJobs")
-                    if total_count is not None and "total_jobs_on_site" not in search_meta:
+                    if worker_id == 1 and total_count is not None and "total_jobs_on_site" not in search_meta:
                         search_meta["total_jobs_on_site"] = total_count
                         print(f"[*] Total Matching Jobs on Naukri: {total_count:,} jobs available\n", flush=True)
                     jobs = payload.get("jobDetails", [])
