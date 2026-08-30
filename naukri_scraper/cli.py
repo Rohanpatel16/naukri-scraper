@@ -44,8 +44,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "-p", "--pages",
         type=int,
-        default=5,
-        help="Maximum pages to scrape when using --url (default: 5)",
+        default=None,
+        help="Pages to scrape (default: auto-detect and scrape all available pages)",
     )
     parser.add_argument(
         "-k", "--keywords",
@@ -79,8 +79,8 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "-n", "--max-jobs",
         type=int,
-        default=50,
-        help="Maximum number of job listings to collect (default: 50)",
+        default=None,
+        help="Maximum jobs to collect (default: collect all available jobs)",
     )
     parser.add_argument(
         "-s", "--max-sitemaps",
@@ -109,9 +109,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     start_time = time.time()
 
     if args.url:
+        pages_str = str(args.pages) if args.pages else "Auto-detect (all matching pages)"
+        max_jobs_str = str(args.max_jobs) if args.max_jobs else "All matching jobs"
         print(f"[*] Target Custom URL : {args.url}")
-        print(f"[*] Max Search Pages  : {args.pages}")
-        print(f"[*] Target Max Jobs   : {args.max_jobs}")
+        print(f"[*] Search Pages      : {pages_str}")
+        print(f"[*] Target Max Jobs   : {max_jobs_str}")
         print(f"[*] Output File       : {args.output}\n" + "-" * 60)
 
         browser_scraper = NaukriBrowserScraper()
@@ -127,11 +129,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         elif args.days:
             time_filter_str = f"Last {args.days} Days"
 
+        effective_max_jobs = args.max_jobs or 50
         print(f"[*] Search Keywords : {', '.join(args.keywords)}")
         print(f"[*] Location Filter : {args.location or 'All Locations'}")
         print(f"[*] Experience      : {args.experience if args.experience is not None else 'Any'}")
         print(f"[*] Time Filter     : {time_filter_str}")
-        print(f"[*] Target Max Jobs : {args.max_jobs}")
+        print(f"[*] Target Max Jobs : {effective_max_jobs}")
         print(f"[*] Output File     : {args.output}\n" + "-" * 60)
 
         scraper = NaukriScraper()
@@ -141,7 +144,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             experience=args.experience,
             hours=args.hours,
             days=args.days,
-            max_jobs=args.max_jobs,
+            max_jobs=effective_max_jobs,
             max_sitemaps=args.max_sitemaps,
         )
 

@@ -637,10 +637,12 @@ class NaukriBrowserScraper:
     async def _async_scrape_url(
         self,
         search_url: str,
-        max_pages: int = 5,
-        max_jobs: int = 100,
+        max_pages: Optional[int] = None,
+        max_jobs: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
-        """Internal asynchronous multi-tab coordinator."""
+        """Internal asynchronous multi-tab coordinator with auto-pagination support."""
+        effective_max_jobs = max_jobs if (max_jobs is not None and max_jobs > 0) else 10000
+
         async with async_playwright() as p:
             browser: Optional[Browser] = None
             for channel in ["msedge", "chrome", None]:
@@ -680,33 +682,67 @@ class NaukriBrowserScraper:
             )
             await context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined});")
 
-            # Partition pages among workers (interleaved for load balancing)
-            actual_workers = min(self.num_workers, max_pages)
-            all_page_nums = list(range(1, max_pages + 1))
-            worker_partitions = [all_page_nums[i::actual_workers] for i in range(actual_workers)]
-
             search_meta: Dict[str, Any] = {}
-            tasks = [
-                self._scrape_tab_worker(w_idx + 1, parts, search_url, context, search_meta)
-                for w_idx, parts in enumerate(worker_partitions)
-            ]
-
-            results = await asyncio.gather(*tasks)
-
-            # Deduplicate and cap results
             all_jobs: List[Dict[str, Any]] = []
             seen_job_ids: Set[str] = set()
 
-            for worker_res in results:
-                for job in worker_res:
+            if max_pages is not None and max_pages > 0:
+                target_pages = max_pages
+                all_page_nums = list(range(1, target_pages + 1))
+                actual_workers = min(self.num_workers, len(all_page_nums))
+                worker_partitions = [all_page_nums[i::actual_workers] for i in range(actual_workers)]
+
+                tasks = [
+                    self._scrape_tab_worker(w_idx + 1, parts, search_url, context, search_meta)
+                    for w_idx, parts in enumerate(worker_partitions)
+                ]
+                results = await asyncio.gather(*tasks)
+                for worker_res in results:
+                    for job in worker_res:
+                        jid = job.get("job_id")
+                        if jid and jid not in seen_job_ids:
+                            seen_job_ids.add(jid)
+                            all_jobs.append(job)
+                            if len(all_jobs) >= effective_max_jobs:
+                                break
+                    if len(all_jobs) >= effective_max_jobs:
+                        break
+            else:
+                # Auto-detect: Scrape Page 1 first to capture exact filtered count
+                p1_jobs = await self._scrape_tab_worker(1, [1], search_url, context, search_meta)
+                for job in p1_jobs:
                     jid = job.get("job_id")
                     if jid and jid not in seen_job_ids:
                         seen_job_ids.add(jid)
                         all_jobs.append(job)
-                        if len(all_jobs) >= max_jobs:
+
+                total_available = search_meta.get("total_jobs_on_site")
+                if total_available:
+                    target_pages = min(100, max(1, (total_available + 19) // 20))
+                    print(f"[*] Auto-detected {total_available:,} jobs across {target_pages} search pages. Scraping all available pages...\n", flush=True)
+                else:
+                    target_pages = 100
+
+                if target_pages > 1 and len(all_jobs) < effective_max_jobs:
+                    remaining_page_nums = list(range(2, target_pages + 1))
+                    actual_workers = min(self.num_workers, len(remaining_page_nums))
+                    worker_partitions = [remaining_page_nums[i::actual_workers] for i in range(actual_workers)]
+
+                    tasks = [
+                        self._scrape_tab_worker(w_idx + 1, parts, search_url, context, search_meta)
+                        for w_idx, parts in enumerate(worker_partitions)
+                    ]
+                    results = await asyncio.gather(*tasks)
+                    for worker_res in results:
+                        for job in worker_res:
+                            jid = job.get("job_id")
+                            if jid and jid not in seen_job_ids:
+                                seen_job_ids.add(jid)
+                                all_jobs.append(job)
+                                if len(all_jobs) >= effective_max_jobs:
+                                    break
+                        if len(all_jobs) >= effective_max_jobs:
                             break
-                if len(all_jobs) >= max_jobs:
-                    break
 
             # Pure dynamic website enrichment inside active context
             await enrich_company_websites_in_browser(all_jobs, context, num_tabs=6, max_enrichment_seconds=120.0)
@@ -720,14 +756,14 @@ class NaukriBrowserScraper:
             except Exception:
                 pass
 
-        logger.info("Scraped %d unique jobs across %d pages.", len(all_jobs), max_pages)
+        logger.info("Scraped %d unique jobs across all matching pages.", len(all_jobs))
         return all_jobs
 
     def scrape_url(
         self,
         search_url: str,
-        max_pages: int = 5,
-        max_jobs: int = 100,
+        max_pages: Optional[int] = None,
+        max_jobs: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
         """Synchronous public entry point for CLI and external callers."""
         try:
