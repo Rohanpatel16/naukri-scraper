@@ -18,7 +18,8 @@ import json
 import logging
 import re
 import sys
-from typing import Any, Dict, List, Optional, Set
+import urllib.parse
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from playwright.async_api import Browser, BrowserContext, Page, async_playwright
 
@@ -42,6 +43,65 @@ def clean_html(text: Optional[str]) -> str:
     return re.sub(r"\s+", " ", t).strip()
 
 
+def clean_company_queries(name: str) -> List[str]:
+    """Generates ordered search query variations for Clearbit."""
+    candidates: List[str] = []
+    raw = name.strip()
+    if raw:
+        candidates.append(raw)
+
+    # Remove parentheses content e.g. "Willis Towers Watson (WTW)" -> "Willis Towers Watson"
+    no_parens = re.sub(r"\(.*?\)", "", raw).strip()
+    if no_parens and no_parens not in candidates:
+        candidates.append(no_parens)
+
+    # Remove legal/business suffixes
+    cleaned = re.sub(
+        r"\b(pvt\.?|private|ltd\.?|limited|llc|inc\.?|corp\.?|corporation|group|services|enterprises|technologies|solutions)\b",
+        "",
+        no_parens,
+        flags=re.IGNORECASE,
+    ).strip()
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    if cleaned and cleaned not in candidates and len(cleaned) > 2:
+        candidates.append(cleaned)
+
+    return candidates
+
+
+async def dynamic_extract_clearbit(
+    client: Any,
+    company_name: str,
+    semaphore: asyncio.Semaphore,
+) -> Tuple[str, str]:
+    """Queries Clearbit Autocomplete API as a fast dynamic fallback."""
+    async with semaphore:
+        queries = clean_company_queries(company_name)
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Accept": "application/json",
+        }
+
+        for q in queries:
+            encoded_q = urllib.parse.quote(q)
+            url = f"https://autocomplete.clearbit.com/v1/companies/suggest?query={encoded_q}"
+            try:
+                if client is not None:
+                    resp = await client.get(url, headers=headers, timeout=5.0)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        if isinstance(data, list) and len(data) > 0:
+                            domain = data[0].get("domain", "").strip()
+                            if domain:
+                                web = f"https://{domain}" if not domain.startswith("http") else domain
+                                return company_name, web
+            except Exception:
+                pass
+            await asyncio.sleep(0.04)
+
+        return company_name, ""
+
+
 async def dynamic_extract_ambitionbox(page: Page, url: str) -> tuple[str, bool]:
     """Pure dynamic extraction from AmbitionBox page.
     
@@ -59,14 +119,16 @@ async def dynamic_extract_ambitionbox(page: Page, url: str) -> tuple[str, bool]:
             html_text = await page.content()
             if "__NEXT_DATA__" in html_text or '"website"' in html_text:
                 page_loaded = True
-                m = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', html_text)
+                m = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', html_text, re.DOTALL)
                 if m:
                     try:
-                        d = json.loads(m.group(1))
-                        props = d.get("props", {}).get("pageProps", {}) or {}
-                        meta = props.get("companyMetaInformation", {}) or {}
-                        header = props.get("companyHeaderData", {}) or {}
-                        website = (meta.get("website") or header.get("website") or "").strip()
+                        data = json.loads(m.group(1))
+                        props = data.get("props", {}).get("pageProps", {})
+                        meta = props.get("companyMetaInformation") or props.get("companyHeaderData") or {}
+                        raw_w = meta.get("website") or ""
+                        if raw_w and isinstance(raw_w, str) and raw_w.strip():
+                            raw_w = raw_w.strip()
+                            website = f"https://{raw_w}" if not raw_w.startswith("http") else raw_w
                     except Exception:
                         pass
 
@@ -91,119 +153,142 @@ async def enrich_company_websites_in_browser(
     num_tabs: int = 3,
     max_enrichment_seconds: float = 180.0,
 ) -> None:
-    """Pure dynamic live enrichment for all company websites directly from AmbitionBox:
-    - 0% hardcoding: All websites are retrieved live directly from AmbitionBox.
-    - Accurate detection of listed websites vs companies without website entries.
-    - Multi-tab queue processing for speed.
-    - Guaranteed no-hang with hard timeouts and graceful cleanup.
+    """Pure dynamic live enrichment with two-tier strategy:
+    1. Primary: AmbitionBox live extraction via concurrent browser tabs.
+    2. Fallback: Clearbit Autocomplete API for unlisted or missing websites.
+    - 100% pure dynamic, 0% hardcoding.
     """
     url_to_comp: Dict[str, str] = {}
+    all_company_names: Set[str] = set()
+
     for j in jobs:
         ab_url = j.get("ambition_box_url")
         cname = (j.get("company") or "").strip()
+        if cname:
+            all_company_names.add(cname)
         if ab_url and ab_url.startswith("http") and ab_url not in url_to_comp:
             url_to_comp[ab_url] = cname or "Company"
 
-    unique_items = list(url_to_comp.items())
-    total = len(unique_items)
-    if total == 0:
-        return
+    unique_ab_items = list(url_to_comp.items())
+    total_ab = len(unique_ab_items)
 
-    print(f"\n[*] Pure dynamic live enrichment for {total} unique companies from AmbitionBox...", flush=True)
-    logger.info("Enriching %d unique company websites dynamically...", total)
+    print(f"\n[*] Pure dynamic live enrichment (AmbitionBox primary + Clearbit fallback)...", flush=True)
+    logger.info("Enriching %d unique company websites dynamically...", max(total_ab, len(all_company_names)))
 
     completed = 0
     url_to_website: Dict[str, str] = {}
+    comp_to_website: Dict[str, str] = {}
     remaining_to_fetch: List[tuple[str, str]] = []
 
-    # Check runtime cache first for previously queried URLs in this session
-    for ab_url, comp_name in unique_items:
+    # Check runtime cache first
+    for ab_url, comp_name in unique_ab_items:
         if ab_url in _COMPANY_WEBSITE_CACHE:
-            url_to_website[ab_url] = _COMPANY_WEBSITE_CACHE[ab_url]
+            cached_w = _COMPANY_WEBSITE_CACHE[ab_url]
+            url_to_website[ab_url] = cached_w
+            if cached_w:
+                comp_to_website[comp_name] = cached_w
             completed += 1
         else:
             remaining_to_fetch.append((ab_url, comp_name))
 
-    if not remaining_to_fetch:
-        for job in jobs:
-            ab_url = job.get("ambition_box_url", "")
-            if ab_url in url_to_website:
-                job["company_website"] = url_to_website[ab_url]
-        return
+    # --- Phase 1: AmbitionBox Concurrent Extraction ---
+    if remaining_to_fetch:
+        queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue()
+        for item in remaining_to_fetch:
+            await queue.put(item)
 
-    queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue()
-    for item in remaining_to_fetch:
-        await queue.put(item)
+        async def worker_tab(tab_id: int) -> None:
+            nonlocal completed
+            page: Optional[Page] = None
+            try:
+                page = await context.new_page()
 
-    async def worker_tab(tab_id: int) -> None:
-        nonlocal completed
-        page: Optional[Page] = None
-        try:
-            page = await context.new_page()
+                async def route_handler(route):
+                    try:
+                        if route.request.resource_type in ["image", "media", "font"]:
+                            await route.abort()
+                        else:
+                            await route.continue_()
+                    except Exception:
+                        pass
 
-            async def route_handler(route):
-                try:
-                    if route.request.resource_type in ["image", "media", "font"]:
-                        await route.abort()
+                await page.route("**/*", route_handler)
+
+                while not queue.empty():
+                    try:
+                        ab_url, comp_name = queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+
+                    website, is_detected = await dynamic_extract_ambitionbox(page, ab_url)
+                    _COMPANY_WEBSITE_CACHE[ab_url] = website
+                    url_to_website[ab_url] = website
+                    if website:
+                        comp_to_website[comp_name] = website
+                    completed += 1
+
+                    if website:
+                        status_str = f"{website} (AmbitionBox)"
+                    elif is_detected:
+                        status_str = "[Not listed on AmbitionBox -> checking Clearbit...]"
                     else:
-                        await route.continue_()
-                except Exception:
-                    pass
+                        status_str = "[Unreachable on AmbitionBox -> checking Clearbit...]"
 
-            await page.route("**/*", route_handler)
+                    print(f"[{completed}/{total_ab}] {comp_name} -> {status_str}", flush=True)
+                    queue.task_done()
+                    await asyncio.sleep(0.08)
 
-            while not queue.empty():
-                try:
-                    ab_url, comp_name = queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    break
+            except Exception:
+                pass
+            finally:
+                if page:
+                    try:
+                        await page.unroute("**/*")
+                        await asyncio.wait_for(page.close(), timeout=3.0)
+                    except Exception:
+                        pass
 
-                website, is_detected = await dynamic_extract_ambitionbox(page, ab_url)
-                _COMPANY_WEBSITE_CACHE[ab_url] = website
-                url_to_website[ab_url] = website
-                completed += 1
+        actual_tabs = min(num_tabs, len(remaining_to_fetch))
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(*(worker_tab(i) for i in range(actual_tabs))),
+                timeout=max_enrichment_seconds,
+            )
+        except asyncio.TimeoutError:
+            print(f"[!] Reached max AmbitionBox time limit ({max_enrichment_seconds}s); checking Clearbit fallback...", flush=True)
 
-                if website:
-                    status_str = website
-                elif is_detected:
-                    status_str = "[Not listed on AmbitionBox]"
-                else:
-                    status_str = "[Page unreachable / no website]"
+    # --- Phase 2: Clearbit Fallback for Missing Websites ---
+    unresolved_companies = [c for c in all_company_names if not comp_to_website.get(c)]
+    if unresolved_companies:
+        print(f"\n[*] Querying Clearbit Autocomplete API fallback for {len(unresolved_companies)} companies...", flush=True)
+        semaphore = asyncio.Semaphore(10)
 
-                print(f"[{completed}/{total}] {comp_name} -> {status_str}", flush=True)
-                queue.task_done()
-                await asyncio.sleep(0.08)
-
+        try:
+            import httpx
+            limits = httpx.Limits(max_keepalive_connections=15, max_connections=20)
+            async with httpx.AsyncClient(limits=limits, follow_redirects=True) as http_client:
+                tasks = [dynamic_extract_clearbit(http_client, c, semaphore) for c in unresolved_companies]
+                for coro in asyncio.as_completed(tasks):
+                    cname, clearbit_web = await coro
+                    if clearbit_web:
+                        comp_to_website[cname] = clearbit_web
+                        print(f"  [+] Clearbit Found: {cname} -> {clearbit_web}", flush=True)
         except Exception:
             pass
-        finally:
-            if page:
-                try:
-                    await page.unroute("**/*")
-                    await asyncio.wait_for(page.close(), timeout=3.0)
-                except Exception:
-                    pass
-
-    actual_tabs = min(num_tabs, len(remaining_to_fetch))
-    try:
-        await asyncio.wait_for(
-            asyncio.gather(*(worker_tab(i) for i in range(actual_tabs))),
-            timeout=max_enrichment_seconds,
-        )
-    except asyncio.TimeoutError:
-        print(f"[!] Reached max enrichment time limit ({max_enrichment_seconds}s); proceeding with collected data.", flush=True)
 
     # Assign enriched websites back to all matching jobs
     found_count = 0
     for job in jobs:
+        cname = (job.get("company") or "").strip()
         ab_url = job.get("ambition_box_url", "")
-        if ab_url in url_to_website:
-            web = url_to_website[ab_url]
-            job["company_website"] = web
-            if web:
-                found_count += 1
+        
+        # Priority: Direct company resolution, then AmbitionBox URL resolution
+        web = comp_to_website.get(cname) or url_to_website.get(ab_url) or ""
+        job["company_website"] = web
+        if web:
+            found_count += 1
 
-    print(f"[+] Finished company website enrichment ({found_count}/{total} websites resolved).\n", flush=True)
+    print(f"\n[+] Finished website enrichment ({found_count}/{len(jobs)} jobs resolved with official websites).\n", flush=True)
 
 
 class NaukriBrowserScraper:
